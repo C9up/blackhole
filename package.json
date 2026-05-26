@@ -1,0 +1,59 @@
+{
+	"name": "@c9up/blackhole",
+	"version": "0.1.0",
+	"description": "Blackhole — Rust-native security filter (XSS, CSRF, rate-limiting) for any Node.js framework",
+	"license": "MIT",
+	"type": "module",
+	"main": "src/index.ts",
+	"types": "src/index.ts",
+	"files": [
+		"src",
+		"scripts",
+		"index.*.node",
+		"README.md",
+		"LICENSE"
+	],
+	"exports": {
+		".": {
+			"import": "./src/index.ts",
+			"types": "./src/index.ts"
+		},
+		"./middleware": {
+			"import": "./src/middleware.ts",
+			"types": "./src/middleware.ts"
+		},
+		"./provider": {
+			"import": "./src/BlackholeProvider.ts",
+			"types": "./src/BlackholeProvider.ts"
+		},
+		"./config": {
+			"import": "./src/config.ts",
+			"types": "./src/config.ts"
+		}
+	},
+	"scripts": {
+		"build": "tsc",
+		"typecheck": "tsc --noEmit",
+		"build:rust": "cargo build --release -p blackhole-engine-napi",
+		"build:napi": "pnpm build:rust && node scripts/copy-napi.mjs",
+		"test": "vitest run",
+		"test:rust": "cargo test -p blackhole-engine",
+		"lint": "biome check src/",
+		"test:coverage": "vitest run --coverage"
+	},
+	"peerDependencies": {
+		"@c9up/ream": "workspace:*"
+	},
+	"peerDependenciesMeta": {
+		"@c9up/ream": {
+			"optional": true
+		}
+	},
+	"devDependencies": {
+		"vitest": "^4.1.2",
+		"@types/node": "^22.19.15"
+	},
+	"engines": {
+		"node": ">=22.0.0"
+	}
+}

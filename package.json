@@ -4,35 +4,40 @@
 	"description": "Blackhole — Rust-native security filter (XSS, CSRF, rate-limiting) for any Node.js framework",
 	"license": "MIT",
 	"type": "module",
-	"main": "src/index.ts",
-	"types": "src/index.ts",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
 	"files": [
-		"src",
-		"scripts",
-		"index.*.node",
+		"LICENSE",
 		"README.md",
-		"LICENSE"
+		"dist",
+		"index.*.node",
+		"scripts",
+		"src"
 	],
 	"exports": {
 		".": {
-			"import": "./src/index.ts",
-			"types": "./src/index.ts"
+			"types": "./dist/index.d.ts",
+			"development": "./src/index.ts",
+			"import": "./dist/index.js"
 		},
 		"./middleware": {
-			"import": "./src/middleware.ts",
-			"types": "./src/middleware.ts"
+			"types": "./dist/middleware.d.ts",
+			"development": "./src/middleware.ts",
+			"import": "./dist/middleware.js"
 		},
 		"./provider": {
-			"import": "./src/BlackholeProvider.ts",
-			"types": "./src/BlackholeProvider.ts"
+			"types": "./dist/BlackholeProvider.d.ts",
+			"development": "./src/BlackholeProvider.ts",
+			"import": "./dist/BlackholeProvider.js"
 		},
 		"./config": {
-			"import": "./src/config.ts",
-			"types": "./src/config.ts"
+			"types": "./dist/config.d.ts",
+			"development": "./src/config.ts",
+			"import": "./dist/config.js"
 		}
 	},
 	"scripts": {
-		"build": "tsc",
+		"build": "tsc -p tsconfig.build.json",
 		"typecheck": "tsc --noEmit",
 		"build:rust": "cargo build --release -p blackhole-engine-napi",
 		"build:napi": "pnpm build:rust && node scripts/copy-napi.mjs",
@@ -51,7 +56,8 @@
 	},
 	"devDependencies": {
 		"vitest": "^4.1.2",
-		"@types/node": "^22.19.15"
+		"@types/node": "^22.19.15",
+		"typescript": "^6.0.2"
 	},
 	"engines": {
 		"node": ">=22.0.0"

@@ -1,0 +1,17 @@
+[package]
+name = "blackhole-engine-napi"
+version = "0.1.0"
+edition = "2021"
+description = "NAPI bindings for the Blackhole security filter"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+blackhole-engine = { path = "../blackhole-engine" }
+napi = { version = "2", features = ["napi4", "serde-json"] }
+napi-derive = "2"
+serde_json = "1"
+
+[build-dependencies]
+napi-build = "2"

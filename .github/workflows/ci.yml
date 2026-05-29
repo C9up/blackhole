@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      confirm_overwrite:
+        description: 'Type YES to override the drift gate (force-publish even if registry version >= package.json version). Use only for rollback scenarios.'
+        required: false
+        default: 'no'
 
 permissions:
   contents: read
@@ -102,35 +107,109 @@ jobs:
       - run: cargo test --workspace
 
   # Publish job — gated on workflow_dispatch (manual maintainer trigger).
-  # DISABLED until Story 52.4 Decision C clears (ream-cli npm version sync) and ADR-003
-  # publish strategy is approved. Sigil is the canary; uncomment here only after sigil
-  # publish lands and the maintainer signs off.
-  # See _bmad-output/implementation-artifacts/52-1-napi-ci-multi-platform-sweep.md AC6.
-  #
-  # publish:
-  #   name: Publish to npm
-  #   runs-on: ubuntu-latest
-  #   needs: [build-and-test, cargo-tests]
-  #   if: github.event_name == 'workflow_dispatch'
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: pnpm/action-setup@v4
-  #       with: { version: 9 }
-  #     - uses: actions/setup-node@v4
-  #       with:
-  #         node-version: '22'
-  #         registry-url: 'https://registry.npmjs.org'
-  #     - name: Verify NPM_TOKEN secret
-  #       run: |
-  #         if [ -z "${{ secrets.NPM_TOKEN }}" ]; then
-  #           echo "::error::NPM_TOKEN secret missing — set in repo settings before manual publish"
-  #           exit 1
-  #         fi
-  #     - run: pnpm install
-  #     - uses: actions/download-artifact@v4
-  #       with:
-  #         pattern: blackhole-napi-*
-  #         merge-multiple: true
-  #     - run: pnpm publish --access public --no-git-checks
-  #       env:
-  #         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+  # Requires NPM_TOKEN secret + a v<MAJOR>.<MINOR>.<PATCH> tag at HEAD matching
+  # package.json. Drift gate refuses to overwrite a published version (or roll
+  # back to an older one) without `confirm_overwrite=YES`.
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [build-and-test, cargo-tests]
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Verify NPM_TOKEN secret
+        run: |
+          if [ -z "${{ secrets.NPM_TOKEN }}" ]; then
+            echo "::error::NPM_TOKEN secret missing — set in repo settings before manual publish"
+            exit 1
+          fi
+
+      - name: Tag-vs-package.json gate
+        run: |
+          tag=$(git tag --points-at HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
+          if [ -z "$tag" ]; then
+            echo "::error::HEAD has no v<MAJOR>.<MINOR>.<PATCH>-shaped tag — refuse to publish from an untagged commit"
+            exit 1
+          fi
+          node_err=$(mktemp)
+          if ! pkg_v=$(node -p "require('./package.json').version" 2>"$node_err"); then
+            echo "::error::Failed to read package.json version: $(cat "$node_err")"
+            rm -f "$node_err"; exit 1
+          fi
+          rm -f "$node_err"
+          if [ -z "$pkg_v" ]; then
+            echo "::error::package.json version field is empty"
+            exit 1
+          fi
+          pkg_tag="v${pkg_v}"
+          if [ "$tag" != "$pkg_tag" ]; then
+            echo "::error::Tag $tag does not match package.json $pkg_tag — refuse to publish from a drifted tag"
+            exit 1
+          fi
+          echo "Tag gate passed: $tag == $pkg_tag"
+
+      - name: Drift fail-closed gate
+        env:
+          CONFIRM_OVERWRITE: ${{ inputs.confirm_overwrite }}
+        run: |
+          node_err=$(mktemp)
+          if ! local_v=$(node -p "require('./package.json').version" 2>"$node_err"); then
+            echo "::error::Failed to read package.json version: $(cat "$node_err")"
+            rm -f "$node_err"; exit 1
+          fi
+          rm -f "$node_err"
+          if [ -z "$local_v" ]; then
+            echo "::error::package.json version field is empty"
+            exit 1
+          fi
+          npm_err=$(mktemp)
+          npm_v=$(npm view --fetch-timeout=30000 @c9up/blackhole version 2>"$npm_err")
+          status=$?
+          err=$(cat "$npm_err"); rm -f "$npm_err"
+          if [ "$status" -ne 0 ]; then
+            if echo "$err" | grep -qE 'E404|404 Not Found'; then
+              npm_v=""
+              echo "Drift gate: package not yet on registry — first-publish path"
+            else
+              echo "::error::Cannot reach npm registry — refuse to publish without a verified registry version. Output: $err"
+              exit 1
+            fi
+          fi
+          if [ -z "$npm_v" ]; then
+            echo "Drift gate passed: first publish of @c9up/blackhole (local $local_v)"
+            exit 0
+          fi
+          highest=$(printf '%s\n%s\n' "$npm_v" "$local_v" | sort -V | tail -1)
+          if [ "$local_v" = "$npm_v" ]; then
+            if [ "$CONFIRM_OVERWRITE" != "YES" ]; then
+              echo "::error::Local version $local_v already published — bump package.json or re-run with confirm_overwrite=YES (rollback path)"
+              exit 1
+            fi
+            echo "Override accepted: republishing $local_v over registry $npm_v"
+          elif [ "$highest" = "$npm_v" ]; then
+            if [ "$CONFIRM_OVERWRITE" != "YES" ]; then
+              echo "::error::Registry version $npm_v is newer than local $local_v — refuse to roll back without confirm_overwrite=YES"
+              exit 1
+            fi
+            echo "Override accepted: rolling back from $npm_v to $local_v"
+          else
+            echo "Drift gate passed: local $local_v > registry $npm_v"
+          fi
+
+      - run: pnpm install
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: blackhole-napi-*
+          merge-multiple: true
+      - run: pnpm publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

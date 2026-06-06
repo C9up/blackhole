@@ -39,7 +39,7 @@ jobs:
           - { os: macos-14, target: aarch64-apple-darwin, suffix: darwin-arm64 }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, suffix: win32-x64-msvc }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -58,7 +58,7 @@ jobs:
           elif [ -f "$out/lib${{ env.LIBBASE }}.dylib" ]; then cp "$out/lib${{ env.LIBBASE }}.dylib" "$dest"
           elif [ -f "$out/${{ env.LIBBASE }}.dll" ];      then cp "$out/${{ env.LIBBASE }}.dll"      "$dest"
           else echo "::error::no cdylib in $out" && ls -la "$out" && exit 1; fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: node-${{ matrix.suffix }}
           path: ${{ env.NODENAME }}.${{ matrix.suffix }}.node
@@ -68,13 +68,13 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: node-*
           merge-multiple: true

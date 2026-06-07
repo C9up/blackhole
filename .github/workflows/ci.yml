@@ -29,12 +29,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,    suffix: linux-x64-gnu,   target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04-arm, suffix: linux-arm64-gnu, target: aarch64-unknown-linux-gnu }
-          # darwin-x64 cross-compiled on arm64 (macos-13 Intel runners are scarce).
-          - { os: macos-14,         suffix: darwin-x64,      target: x86_64-apple-darwin }
-          - { os: macos-14,         suffix: darwin-arm64,    target: aarch64-apple-darwin }
-          - { os: windows-latest,   suffix: win32-x64-msvc,  target: x86_64-pc-windows-msvc }
+          - { os: ubuntu-latest,    suffix: linux-x64-gnu,   target: x86_64-unknown-linux-gnu,  test: true }
+          - { os: ubuntu-24.04-arm, suffix: linux-arm64-gnu, target: aarch64-unknown-linux-gnu, test: true }
+          # darwin-x64 cross-compiled on arm64 (macos-13 Intel runners are scarce);
+          # build-only — an x86_64 .node can't be loaded/tested on the arm64 runner.
+          - { os: macos-14,         suffix: darwin-x64,      target: x86_64-apple-darwin,       test: false }
+          - { os: macos-14,         suffix: darwin-arm64,    target: aarch64-apple-darwin,      test: true }
+          - { os: windows-latest,   suffix: win32-x64-msvc,  target: x86_64-pc-windows-msvc,    test: true }
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v6
@@ -55,11 +56,12 @@ jobs:
           CARGO_BUILD_TARGET: ${{ matrix.target }}
 
       - name: Vitest
+        if: matrix.test
         run: pnpm exec vitest run --reporter=json --outputFile=test-results.json
         shell: bash
 
       - name: Smoke gate — tests ran AND zero skipped (Linux/macOS)
-        if: runner.os != 'Windows'
+        if: matrix.test && runner.os != 'Windows'
         run: |
           if [ ! -f test-results.json ]; then
             echo "::error::test-results.json not produced — pnpm test failed before writing"
@@ -78,7 +80,7 @@ jobs:
         shell: bash
 
       - name: Smoke gate — tests ran AND zero skipped (Windows)
-        if: runner.os == 'Windows'
+        if: matrix.test && runner.os == 'Windows'
         run: |
           if (-not (Test-Path test-results.json)) {
             Write-Error "test-results.json not produced — pnpm test failed before writing"

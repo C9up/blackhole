@@ -15,7 +15,6 @@
  *   router.use([() => import('@c9up/blackhole/middleware')])
  */
 
-import app from "@c9up/ream/services/app";
 import { BLACKHOLE_KEY } from "./BlackholeProvider.js";
 import {
 	appendVaryValue,
@@ -89,7 +88,14 @@ function appendVary(ctx: ReamContext, value: string): void {
 }
 
 export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
-	const resolved = app.container.resolve(BLACKHOLE_KEY);
+	// Variable specifier so tsc does not statically resolve the optional
+	// `@c9up/ream` peer at build time — blackhole stays framework-agnostic and
+	// builds standalone. The Ream app singleton is loaded only at runtime, when
+	// this middleware actually runs inside Ream.
+	const appSpecifier = "@c9up/ream/services/app";
+	const appMod: { default: { container: { resolve(key: unknown): unknown } } } =
+		await import(appSpecifier);
+	const resolved = appMod.default.container.resolve(BLACKHOLE_KEY);
 	if (!isBlackhole(resolved)) {
 		throw new Error(
 			"[BLACKHOLE_NOT_REGISTERED] BlackholeProvider must register BLACKHOLE_KEY before the middleware runs.",

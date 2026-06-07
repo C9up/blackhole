@@ -1,5 +1,4 @@
-import { Application } from "@c9up/ream";
-import app, { _setApp } from "@c9up/ream/services/app";
+import app, { setApp } from "@c9up/ream/services/app";
 import { beforeAll, describe, expect, it } from "vitest";
 import BlackholeProvider, {
 	BLACKHOLE_KEY,
@@ -14,7 +13,7 @@ beforeAll(() => {
 	// normally the Ignitor wires it during boot. Unit tests bypass the
 	// Ignitor, so seed a bare Application instance here. After this,
 	// `app.container.singleton(...)` and `.resolve(...)` work as in prod.
-	_setApp(new Application());
+	setApp();
 
 	// Middleware reaches into `app.container.resolve(BLACKHOLE_KEY)` —
 	// register a Blackhole singleton there so every test sees the same

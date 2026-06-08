@@ -1,0 +1,185 @@
+import { describe, expect, it } from "vitest";
+import { createBlackhole } from "../../src/index.js";
+
+describe("blackhole", () => {
+	it("allows a normal GET", () => {
+		const bh = createBlackhole({ csrf: false });
+		const result = bh.check({
+			method: "GET",
+			path: "/api/orders",
+			headers: {},
+		});
+		expect(result.allowed).toBe(true);
+	});
+
+	it("blocks POST without CSRF token", () => {
+		const bh = createBlackhole({ csrf: true });
+		const result = bh.check({
+			method: "POST",
+			path: "/api/orders",
+			headers: {},
+		});
+		expect(result.allowed).toBe(false);
+		expect(result.status).toBe(403);
+	});
+
+	it("allows POST when the XSRF-TOKEN cookie matches the X-XSRF-TOKEN header (double-submit)", () => {
+		const bh = createBlackhole({ csrf: true });
+		const token = bh.generateCsrfToken();
+		const result = bh.check({
+			method: "POST",
+			path: "/api/orders",
+			headers: { "x-xsrf-token": token, cookie: `XSRF-TOKEN=${token}` },
+		});
+		expect(result.allowed).toBe(true);
+	});
+
+	it("allows POST via the _csrf form-body field (server-rendered form)", () => {
+		const bh = createBlackhole({ csrf: true });
+		const token = bh.generateCsrfToken();
+		const result = bh.check({
+			method: "POST",
+			path: "/api/orders",
+			headers: { cookie: `XSRF-TOKEN=${token}` },
+			body: `name=widget&_csrf=${token}`,
+		});
+		expect(result.allowed).toBe(true);
+	});
+
+	it("skips CSRF for an exceptRoutes path (webhooks)", () => {
+		const bh = createBlackhole({ csrf: { exceptRoutes: ["/api/webhooks/*"] } });
+		const result = bh.check({
+			method: "POST",
+			path: "/api/webhooks/stripe",
+			headers: {},
+		});
+		expect(result.allowed).toBe(true);
+	});
+
+	it("rejects POST with a forged header but no matching cookie", () => {
+		const bh = createBlackhole({ csrf: true });
+		const result = bh.check({
+			method: "POST",
+			path: "/api/orders",
+			headers: { "x-csrf-token": bh.generateCsrfToken() },
+		});
+		expect(result.allowed).toBe(false);
+	});
+
+	it("rate-limits after max requests", () => {
+		const bh = createBlackhole({
+			csrf: false,
+			rateLimit: { max: 2, windowSeconds: 60 },
+		});
+		expect(
+			bh.check({ method: "GET", path: "/", headers: {}, remoteAddr: "1.2.3.4" })
+				.allowed,
+		).toBe(true);
+		expect(
+			bh.check({ method: "GET", path: "/", headers: {}, remoteAddr: "1.2.3.4" })
+				.allowed,
+		).toBe(true);
+		const third = bh.check({
+			method: "GET",
+			path: "/",
+			headers: {},
+			remoteAddr: "1.2.3.4",
+		});
+		expect(third.allowed).toBe(false);
+		expect(third.status).toBe(429);
+	});
+
+	it("rejects path-traversal in the request path", () => {
+		const bh = createBlackhole({ csrf: false });
+		expect(
+			bh.check({ method: "GET", path: "/files/../etc/passwd", headers: {} })
+				.allowed,
+		).toBe(false);
+		expect(
+			bh.check({ method: "GET", path: "/files/report.pdf", headers: {} })
+				.allowed,
+		).toBe(true);
+	});
+
+	it("rejects parameter pollution (duplicate query keys, but allows `[]`)", () => {
+		const bh = createBlackhole({ csrf: false });
+		expect(
+			bh.check({ method: "GET", path: "/", query: "a=1&a=2", headers: {} })
+				.allowed,
+		).toBe(false);
+		expect(
+			bh.check({ method: "GET", path: "/", query: "t[]=1&t[]=2", headers: {} })
+				.allowed,
+		).toBe(true);
+	});
+
+	it("sanitizes HTML response", () => {
+		const bh = createBlackhole();
+		const result = bh.sanitizeResponse(
+			"<p>Hello</p><script>alert(1)</script>",
+			"text/html",
+		);
+		expect(result).not.toContain("<script>");
+		expect(result).toContain("<p>Hello</p>");
+	});
+
+	it("does NOT sanitize JSON response", () => {
+		const bh = createBlackhole();
+		const json = '{"name": "O\'Brien", "query": "a > b"}';
+		expect(bh.sanitizeResponse(json, "application/json")).toBe(json);
+	});
+
+	it("computes security headers (Helmet-style)", () => {
+		const h = createBlackhole().securityHeaders();
+		expect(h["x-content-type-options"]).toBe("nosniff");
+		expect(h["x-frame-options"]).toBe("SAMEORIGIN");
+		expect(h["content-security-policy"]).toBe("default-src 'self'");
+		expect(
+			createBlackhole({ securityHeaders: false }).securityHeaders(),
+		).toEqual({});
+	});
+
+	it("CSP @nonce: substitutes per-request nonce (AdonisJS idiom)", () => {
+		const bh = createBlackhole({
+			securityHeaders: { csp: "default-src 'self'; script-src 'self' @nonce" },
+		});
+		expect(bh.cspHasNonce()).toBe(true);
+		const nonce = bh.generateNonce();
+		expect(nonce.length).toBeGreaterThan(0);
+		const csp = bh.securityHeaders(nonce)["content-security-policy"];
+		expect(csp).toContain(`'nonce-${nonce}'`);
+		expect(csp).not.toContain("@nonce");
+		// No nonce supplied → token is dropped, not left dangling.
+		expect(bh.securityHeaders()["content-security-policy"]).not.toContain(
+			"@nonce",
+		);
+		// A static CSP (no @nonce) reports cspHasNonce=false.
+		expect(createBlackhole().cspHasNonce()).toBe(false);
+	});
+
+	it("CORS: allows a configured origin + answers preflight", () => {
+		const bh = createBlackhole({
+			cors: { origin: ["https://app.test"], credentials: true },
+		});
+		const ok = bh.cors("https://app.test", "GET");
+		expect(ok?.headers["access-control-allow-origin"]).toBe("https://app.test");
+		expect(ok?.headers["access-control-allow-credentials"]).toBe("true");
+		expect(ok?.varyOrigin).toBe(true);
+
+		const denied = bh.cors("https://evil.test", "GET");
+		expect(denied?.headers["access-control-allow-origin"]).toBeUndefined();
+
+		const preflight = bh.cors("https://app.test", "OPTIONS");
+		expect(preflight?.preflight).toBe(true);
+		expect(preflight?.headers["access-control-allow-methods"]).toContain(
+			"POST",
+		);
+	});
+
+	it("CORS: undefined when not configured; throws on credentials + wildcard", () => {
+		expect(createBlackhole().cors("https://x.test", "GET")).toBeUndefined();
+		expect(() =>
+			createBlackhole({ cors: { origin: "*", credentials: true } }),
+		).toThrow();
+	});
+});

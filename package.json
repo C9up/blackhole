@@ -1,6 +1,6 @@
 {
   "name": "@c9up/blackhole",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Blackhole — Rust-native security filter (XSS, CSRF, rate-limiting) for any Node.js framework",
   "license": "MIT",
   "type": "module",
@@ -48,7 +48,8 @@
     "test": "vitest run",
     "test:rust": "cargo test -p blackhole-engine",
     "lint": "biome check src/",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "prepublishOnly": "tsc -p tsconfig.build.json"
   },
   "peerDependencies": {
     "@c9up/ream": "^0.1.0"

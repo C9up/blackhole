@@ -133,6 +133,19 @@ describe("blackhole > blackholeExpress", () => {
 		expect(res.getHeader("x-content-type-options")).toBe("nosniff");
 	});
 
+	// Audit 2026-06-13: a plain string res.send() with no explicit content-type
+	// was NOT sanitized (ct read as "" before Express applies its text/html
+	// default), making the headline XSS guard a no-op for the common case.
+	it("sanitizes a plain string res.send() even without an explicit content-type", () => {
+		const mw = blackholeExpress({ csrf: false });
+		const { req, res, spy } = mockExpress({ method: "GET" });
+		mw(req, res, () => {
+			res.send("<p>ok</p><script>alert(1)</script>");
+		});
+		expect(String(spy.sent)).not.toMatch(/<script/i);
+		expect(String(spy.sent)).toContain("<p>ok</p>");
+	});
+
 	it("answers a CORS preflight with 204", () => {
 		const mw = blackholeExpress({
 			csrf: false,
@@ -140,7 +153,10 @@ describe("blackhole > blackholeExpress", () => {
 		});
 		const { req, res, spy } = mockExpress({
 			method: "OPTIONS",
-			headers: { origin: "https://app.test" },
+			headers: {
+				origin: "https://app.test",
+				"access-control-request-method": "GET",
+			},
 		});
 		mw(req, res, () => {
 			throw new Error("next must not run for preflight");

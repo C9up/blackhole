@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createBlackhole } from "../../src/index.js";
+import { createBlackhole, defineConfig } from "../../src/index.js";
 
 describe("blackhole", () => {
 	it("allows a normal GET", () => {
@@ -169,11 +169,25 @@ describe("blackhole", () => {
 		const denied = bh.cors("https://evil.test", "GET");
 		expect(denied?.headers["access-control-allow-origin"]).toBeUndefined();
 
-		const preflight = bh.cors("https://app.test", "OPTIONS");
+		const preflight = bh.cors("https://app.test", "OPTIONS", "GET");
 		expect(preflight?.preflight).toBe(true);
 		expect(preflight?.headers["access-control-allow-methods"]).toContain(
 			"POST",
 		);
+
+		// Audit 2026-06-13: only a genuine preflight short-circuits — a plain
+		// OPTIONS (no Access-Control-Request-Method) or a disallowed origin must
+		// not, so app OPTIONS routes stay reachable and disallowed origins aren't
+		// answered with a bare 204.
+		expect(bh.cors("https://app.test", "OPTIONS")?.preflight).toBe(false);
+		expect(bh.cors("https://evil.test", "OPTIONS", "GET")?.preflight).toBe(
+			false,
+		);
+	});
+
+	it("defineConfig is re-exported from the package root", () => {
+		expect(typeof defineConfig).toBe("function");
+		expect(defineConfig({ csrf: true })).toEqual({ csrf: true });
 	});
 
 	it("CORS: undefined when not configured; throws on credentials + wildcard", () => {

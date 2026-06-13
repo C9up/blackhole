@@ -142,7 +142,12 @@ export function blackholeExpress(options: BlackholeOptions = {}) {
 		const originalSend = res.send.bind(res);
 		res.send = (body?: unknown): unknown => {
 			if (!res.headersSent) {
-				const ct = String(res.getHeader("content-type") ?? "");
+				// Express defaults a string body to text/html inside its real send(),
+				// but that default isn't set yet here — mirror it so res.send("<p>"+x)
+				// is still sanitized (the XSS guard was a no-op for plain strings).
+				const ct =
+					String(res.getHeader("content-type") ?? "") ||
+					(typeof body === "string" ? "text/html" : "");
 				const { headers: secHeaders, body: outBody } = runResponsePhase(bh, {
 					body: typeof body === "string" ? body : "",
 					contentType: ct,

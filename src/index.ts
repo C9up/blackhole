@@ -177,6 +177,7 @@ function computeCors(
 	cfg: CorsConfig,
 	requestOrigin: string,
 	method: string,
+	requestMethod?: string,
 ): CorsResult {
 	const allowed = isOriginAllowed(cfg, requestOrigin);
 	const headers: Record<string, string> = {};
@@ -191,7 +192,14 @@ function computeCors(
 			headers["access-control-expose-headers"] = cfg.exposedHeaders.join(", ");
 		}
 	}
-	const preflight = method.toUpperCase() === "OPTIONS";
+	// A genuine CORS preflight is OPTIONS + an allowed origin + the
+	// Access-Control-Request-Method header. Without these guards EVERY OPTIONS
+	// (disallowed origins included) got a bare 204, hijacking app OPTIONS routes.
+	const preflight =
+		method.toUpperCase() === "OPTIONS" &&
+		Boolean(allowed) &&
+		typeof requestMethod === "string" &&
+		requestMethod.length > 0;
 	if (preflight && allowed) {
 		headers["access-control-allow-methods"] = (
 			cfg.methods ?? [
@@ -249,6 +257,11 @@ export interface CsrfConfig {
 	cookie?: CsrfCookieConfig;
 }
 
+// Re-export the config helper so the documented `import { defineConfig } from
+// '@c9up/blackhole'` resolves (it was previously reachable only via the
+// '@c9up/blackhole/config' subpath).
+export { type BlackholeConfig, defineConfig } from "./config.js";
+
 export interface BlackholeOptions {
 	/** Enable XSS response sanitization (default: true). */
 	xss?: boolean;
@@ -296,7 +309,11 @@ export interface Blackhole {
 	/** Generate a fresh CSP nonce (base64). */
 	generateNonce(): string;
 	/** CORS decision for a request, or `undefined` when CORS isn't configured. */
-	cors(requestOrigin: string, method: string): CorsResult | undefined;
+	cors(
+		requestOrigin: string,
+		method: string,
+		requestMethod?: string,
+	): CorsResult | undefined;
 	/** Name + attributes of the `XSRF-TOKEN` cookie the middleware should seed. */
 	csrfCookie(): { name: string; options: Record<string, unknown> };
 }
@@ -394,9 +411,9 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		generateNonce() {
 			return randomBytes(16).toString("base64");
 		},
-		cors(requestOrigin: string, method: string) {
+		cors(requestOrigin: string, method: string, requestMethod?: string) {
 			return corsConfig
-				? computeCors(corsConfig, requestOrigin, method)
+				? computeCors(corsConfig, requestOrigin, method, requestMethod)
 				: undefined;
 		},
 		csrfCookie() {

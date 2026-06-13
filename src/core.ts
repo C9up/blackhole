@@ -113,7 +113,11 @@ export function runRequestPhase(
 	bh: Blackhole,
 	req: CoreRequest,
 ): RequestOutcome {
-	const cors = bh.cors(req.headers.origin ?? "", req.method);
+	const cors = bh.cors(
+		req.headers.origin ?? "",
+		req.method,
+		req.headers["access-control-request-method"],
+	);
 	const corsHeaders = cors?.headers ?? {};
 	const varyOrigin = cors?.varyOrigin ?? false;
 	if (cors?.preflight) {

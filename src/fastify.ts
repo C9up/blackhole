@@ -2,8 +2,9 @@
  * Blackhole — Fastify adapter.
  *
  * Thin wrapper over the shared `./core` pipeline; no Fastify dependency (types
- * are structural). `onRequest` runs filtering + CSRF/CORS; `onSend` applies
- * protective headers + response sanitization.
+ * are structural). `preValidation` runs filtering + CSRF/CORS (after body
+ * parsing, so the `_csrf` form field is readable); `onSend` applies protective
+ * headers + response sanitization.
  *
  * @example
  *   import { blackholeFastify } from '@c9up/blackhole/fastify'
@@ -34,7 +35,7 @@ interface FastifyRequest {
 /** Structural subset of a Fastify reply the adapter writes. */
 interface FastifyReply {
 	code(statusCode: number): FastifyReply;
-	header(name: string, value: string): FastifyReply;
+	header(name: string, value: string | string[]): FastifyReply;
 	getHeader(name: string): number | string | string[] | undefined;
 	send(payload?: unknown): FastifyReply;
 	/** CSP nonce for this request (Adonis idiom). Seeded by the adapter. */
@@ -44,7 +45,7 @@ interface FastifyReply {
 /** Structural subset of the Fastify instance the plugin registers hooks on. */
 interface FastifyInstance {
 	addHook(
-		name: "onRequest",
+		name: "preValidation",
 		hook: (request: FastifyRequest, reply: FastifyReply) => Promise<void>,
 	): unknown;
 	addHook(
@@ -92,7 +93,10 @@ export function blackholeFastify(options: BlackholeOptions = {}) {
 	const bh = createBlackhole(options);
 
 	return async (fastify: FastifyInstance): Promise<void> => {
-		fastify.addHook("onRequest", async (request, reply) => {
+		// preValidation (not onRequest): runs AFTER Fastify parses the body, so the
+		// `_csrf` form-field token is available to CSRF validation. onRequest fires
+		// before body parsing → request.body undefined → form CSRF was dead.
+		fastify.addHook("preValidation", async (request, reply) => {
 			const coreReq: CoreRequest = {
 				method: request.method,
 				path:
@@ -124,14 +128,20 @@ export function blackholeFastify(options: BlackholeOptions = {}) {
 			}
 			request.csrfToken = outcome.csrfToken;
 			if (outcome.setCookie) {
-				reply.header(
-					"set-cookie",
-					serializeCookie(
-						outcome.setCookie.name,
-						outcome.setCookie.value,
-						outcome.setCookie.options,
-					),
+				// Merge with any Set-Cookie already queued so we don't clobber it
+				// (Set-Cookie must stay as separate header lines, never comma-joined).
+				const cookie = serializeCookie(
+					outcome.setCookie.name,
+					outcome.setCookie.value,
+					outcome.setCookie.options,
 				);
+				const existing = reply.getHeader("set-cookie");
+				const merged: string | string[] = Array.isArray(existing)
+					? [...existing, cookie]
+					: typeof existing === "string"
+						? [existing, cookie]
+						: cookie;
+				reply.header("set-cookie", merged);
 			}
 			if (outcome.cspNonce) reply.nonce = outcome.cspNonce;
 		});

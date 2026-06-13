@@ -21,6 +21,7 @@ interface ExpressResLike {
 	headersSent: boolean;
 	getHeader(name: string): number | string | string[] | undefined;
 	setHeader(name: string, value: string): unknown;
+	append(name: string, value: string | string[]): unknown;
 	status(code: number): ExpressResLike;
 	json(body: unknown): unknown;
 	send(body?: unknown): unknown;
@@ -39,7 +40,7 @@ function mockExpress(opts: {
 	headers?: Record<string, string>;
 	body?: unknown;
 }): { req: ExpressReqLike; res: ExpressResLike; spy: ExpressSpy } {
-	const headers: Record<string, string> = {};
+	const headers: Record<string, string | string[]> = {};
 	const spy: ExpressSpy = {};
 	const res: ExpressResLike = {
 		headersSent: false,
@@ -48,6 +49,15 @@ function mockExpress(opts: {
 		},
 		setHeader(name, value) {
 			headers[name.toLowerCase()] = value;
+		},
+		append(name, value) {
+			const key = name.toLowerCase();
+			const existing = headers[key];
+			const incoming = Array.isArray(value) ? value : [value];
+			headers[key] =
+				existing === undefined
+					? value
+					: [...(Array.isArray(existing) ? existing : [existing]), ...incoming];
 		},
 		status(code) {
 			spy.status = code;
@@ -175,7 +185,7 @@ interface FastifyInstanceLike {
 
 async function registerFastify(
 	plugin: (fastify: FastifyInstanceLike) => Promise<void>,
-): Promise<{ onRequest?: FastifyHook; onSend?: FastifyHook }> {
+): Promise<{ preValidation?: FastifyHook; onSend?: FastifyHook }> {
 	const hooks: Array<{ name: string; fn: FastifyHook }> = [];
 	await plugin({
 		addHook(name, hook) {
@@ -183,7 +193,7 @@ async function registerFastify(
 		},
 	});
 	return {
-		onRequest: hooks.find((h) => h.name === "onRequest")?.fn,
+		preValidation: hooks.find((h) => h.name === "preValidation")?.fn,
 		onSend: hooks.find((h) => h.name === "onSend")?.fn,
 	};
 }
@@ -215,8 +225,8 @@ function mockReply(): {
 }
 
 describe("blackhole > blackholeFastify", () => {
-	it("rejects a POST without a CSRF token in onRequest", async () => {
-		const { onRequest } = await registerFastify(
+	it("rejects a POST without a CSRF token in preValidation", async () => {
+		const { preValidation } = await registerFastify(
 			blackholeFastify({ csrf: true }),
 		);
 		const { reply, spy } = mockReply();
@@ -226,13 +236,13 @@ describe("blackhole > blackholeFastify", () => {
 			headers: {},
 			ip: "1.2.3.4",
 		};
-		await onRequest?.(request, reply, undefined);
+		await preValidation?.(request, reply, undefined);
 		expect(spy.code).toBe(403);
 		expect(spy.sent).toBeDefined();
 	});
 
 	it("seeds request.csrfToken + the XSRF-TOKEN cookie on a GET", async () => {
-		const { onRequest } = await registerFastify(
+		const { preValidation } = await registerFastify(
 			blackholeFastify({ csrf: true }),
 		);
 		const { reply } = mockReply();
@@ -242,7 +252,7 @@ describe("blackhole > blackholeFastify", () => {
 			headers: {},
 			ip: "1.2.3.4",
 		};
-		await onRequest?.(request, reply, undefined);
+		await preValidation?.(request, reply, undefined);
 		expect(typeof request.csrfToken).toBe("string");
 		expect(String(reply.getHeader("set-cookie"))).toMatch(/^XSRF-TOKEN=/);
 	});
@@ -260,5 +270,52 @@ describe("blackhole > blackholeFastify", () => {
 		expect(String(out)).not.toMatch(/<script/i);
 		expect(String(out)).toContain("<p>ok</p>");
 		expect(reply.getHeader("x-content-type-options")).toBe("nosniff");
+	});
+});
+
+describe("blackhole > audit 2026-06-13 fixes", () => {
+	it("Fastify: accepts a POST whose _csrf form field matches the cookie (form CSRF works at preValidation)", async () => {
+		const { preValidation } = await registerFastify(
+			blackholeFastify({ csrf: true }),
+		);
+		// Mint a token + XSRF-TOKEN cookie via a GET.
+		const mint = mockReply();
+		const getReq: FastifyReqLike = {
+			method: "GET",
+			url: "/orders",
+			headers: {},
+			ip: "1.2.3.4",
+		};
+		await preValidation?.(getReq, mint.reply, undefined);
+		const token = getReq.csrfToken;
+		if (typeof token !== "string")
+			throw new Error("expected a minted CSRF token");
+		// Double-submit: cookie + matching _csrf FORM field — only readable now
+		// that the hook runs after body parsing (pre-fix this 403'd).
+		const post = mockReply();
+		const postReq: FastifyReqLike = {
+			method: "POST",
+			url: "/orders",
+			headers: { cookie: `XSRF-TOKEN=${token}` },
+			body: { _csrf: token },
+			ip: "1.2.3.4",
+		};
+		await preValidation?.(postReq, post.reply, undefined);
+		expect(post.spy.code).not.toBe(403);
+	});
+
+	it("Express: appends the XSRF-TOKEN cookie without clobbering a prior Set-Cookie", () => {
+		const mw = blackholeExpress({ csrf: true });
+		const { req, res } = mockExpress({ method: "GET" });
+		res.append("set-cookie", "session=abc"); // queued by an earlier middleware
+		let nextCalled = false;
+		mw(req, res, () => {
+			nextCalled = true;
+		});
+		expect(nextCalled).toBe(true);
+		const raw = res.getHeader("set-cookie");
+		const cookies = Array.isArray(raw) ? raw : [String(raw)];
+		expect(cookies.some((c) => c.startsWith("session=abc"))).toBe(true); // prior survives
+		expect(cookies.some((c) => c.startsWith("XSRF-TOKEN="))).toBe(true); // ours added
 	});
 });

@@ -38,6 +38,8 @@ interface ExpressResponse {
 	headersSent: boolean;
 	getHeader(name: string): number | string | string[] | undefined;
 	setHeader(name: string, value: string): unknown;
+	/** Appends a header value (used for Set-Cookie so prior cookies aren't clobbered). */
+	append(name: string, value: string | string[]): unknown;
 	status(code: number): ExpressResponse;
 	json(body: unknown): unknown;
 	send(body?: unknown): unknown;
@@ -121,7 +123,9 @@ export function blackholeExpress(options: BlackholeOptions = {}) {
 		}
 		req.csrfToken = outcome.csrfToken;
 		if (outcome.setCookie) {
-			res.setHeader(
+			// append, not setHeader — setHeader('set-cookie') replaces any cookie an
+			// earlier middleware already queued; append preserves them all.
+			res.append(
 				"set-cookie",
 				serializeCookie(
 					outcome.setCookie.name,

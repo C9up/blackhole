@@ -1,4 +1,8 @@
-//! General crypto utilities — HMAC, AES-GCM, random bytes, scrypt.
+//! Crypto utilities — HMAC-SHA256 sign/verify + random bytes/hex.
+//!
+//! NOTE: AES-GCM and scrypt are NOT implemented here (the earlier doc claimed
+//! them). This module is also not currently wired into the engine/napi crates —
+//! kept as available primitives (audit 2026-06-13).
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;

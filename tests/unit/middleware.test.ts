@@ -5,7 +5,10 @@ import BlackholeProvider, {
 	type BlackholeAppContext,
 } from "../../src/BlackholeProvider.js";
 import { createBlackhole } from "../../src/index.js";
-import { blackholeMiddleware, type ReamContext } from "../../src/middleware.js";
+import BlackholeMiddleware, {
+	blackholeMiddleware,
+	type ReamContext,
+} from "../../src/middleware.js";
 
 beforeAll(() => {
 	// The `app` singleton is a Proxy that throws "Application accessed
@@ -223,5 +226,16 @@ describe("blackhole > BlackholeProvider", () => {
 		new BlackholeProvider(app).register();
 		const instance = bindings.get(BLACKHOLE_KEY)?.();
 		expect(instance).toBeDefined();
+	});
+});
+
+describe("blackhole > middleware default export (Ream lazy resolver)", () => {
+	it("default export is a class with handle() — works with () => import()", () => {
+		// Ream's resolveMiddlewareEntry does `new mod.default().handle(ctx, next)`
+		// for the lazy `router.use([() => import('@c9up/blackhole/middleware')])`
+		// form. Without a default class that crashes with `new undefined()`.
+		expect(typeof BlackholeMiddleware).toBe("function");
+		const instance = new BlackholeMiddleware();
+		expect(typeof instance.handle).toBe("function");
 	});
 });

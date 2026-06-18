@@ -164,4 +164,17 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 	if (body !== ctx.response.getBody()) ctx.response.setBody(body);
 }
 
+/**
+ * Default export — the Adonis-style class form Ream's lazy middleware resolver
+ * expects (`new mod.default().handle(ctx, next)`). Without it,
+ * `router.use([() => import('@c9up/blackhole/middleware')])` (the documented
+ * form) crashes with `new undefined()`. The named `blackholeMiddleware` stays
+ * for direct registration `router.use([blackholeMiddleware])`.
+ */
+export default class BlackholeMiddleware {
+	handle(ctx: ReamContext, next: ReamNext): Promise<void> {
+		return blackholeMiddleware(ctx, next);
+	}
+}
+
 export { type Blackhole, type BlackholeOptions, createBlackhole };

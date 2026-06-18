@@ -1,5 +1,4 @@
-import app, { setApp } from "@c9up/ream/services/app";
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import BlackholeProvider, {
 	BLACKHOLE_KEY,
 	type BlackholeAppContext,
@@ -10,20 +9,11 @@ import BlackholeMiddleware, {
 	type ReamContext,
 } from "../../src/middleware.js";
 
-beforeAll(() => {
-	// The `app` singleton is a Proxy that throws "Application accessed
-	// before initialization" when `_setApp` hasn't been called yet —
-	// normally the Ignitor wires it during boot. Unit tests bypass the
-	// Ignitor, so seed a bare Application instance here. After this,
-	// `app.container.singleton(...)` and `.resolve(...)` work as in prod.
-	setApp();
-
-	// Middleware reaches into `app.container.resolve(BLACKHOLE_KEY)` —
-	// register a Blackhole singleton there so every test sees the same
-	// instance without having to plumb it through each ctx.
-	const bh = createBlackhole();
-	app.container.singleton(BLACKHOLE_KEY, () => bh);
-});
+// The middleware resolves its Blackhole instance from `ctx.containerResolver`
+// (Ream's per-request IoC resolver) — NOT from a `@c9up/ream` import. One shared
+// instance, wired into a fake resolver per context, so every test sees the same
+// config and the suite stays agnostic / standalone.
+const bh = createBlackhole();
 
 interface ResponseSpy {
 	status?: number;
@@ -80,6 +70,12 @@ function makeReamContext(opts: {
 		},
 	};
 	const ctx: ReamContext = {
+		containerResolver: {
+			make(token) {
+				if (token === BLACKHOLE_KEY) return bh;
+				throw new Error(`No binding for ${String(token)}`);
+			},
+		},
 		request: {
 			method: () => opts.method ?? "GET",
 			url: () => opts.url ?? opts.path ?? "/",

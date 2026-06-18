@@ -29,16 +29,32 @@ import {
 } from "./index.js";
 
 /**
+ * Per-request IoC resolver Ream exposes as `ctx.containerResolver` (Adonis
+ * idiom). Blackhole resolves its `Blackhole` instance through this — reading
+ * from the context it is HANDED — so the package never imports `@c9up/ream` at
+ * runtime and stays framework-agnostic. A host that provides none (non-Ream, or
+ * a misconfigured kernel) yields no resolution and the middleware throws.
+ */
+interface ContainerResolver {
+	make(token: string): unknown;
+}
+
+/**
  * Structural subset of Ream's `HttpContext` that the adapter needs. Kept
  * narrow + permissive (readonly headers, broad return types) so the real
  * `HttpContext` class satisfies this shape without further casting.
  *
- * The Blackhole instance is resolved from `app.container` (imported below)
- * rather than from the context — Ream's HttpContext does not expose the
- * IoC container per-request, so the middleware reaches the singleton
- * registry directly.
+ * The Blackhole instance is resolved from `ctx.containerResolver` (Ream's
+ * per-request IoC resolver), NOT by importing the app singleton — that keeps
+ * blackhole agnostic of `@c9up/ream` at runtime.
  */
 export interface ReamContext {
+	/**
+	 * Per-request IoC resolver (Ream's `ctx.containerResolver`). Blackhole
+	 * resolves its `Blackhole` instance through it — agnostic, no `@c9up/ream`
+	 * import.
+	 */
+	containerResolver?: ContainerResolver;
 	request: {
 		method(): string;
 		url(full?: boolean): string;
@@ -88,17 +104,14 @@ function appendVary(ctx: ReamContext, value: string): void {
 }
 
 export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
-	// Variable specifier so tsc does not statically resolve the optional
-	// `@c9up/ream` peer at build time — blackhole stays framework-agnostic and
-	// builds standalone. The Ream app singleton is loaded only at runtime, when
-	// this middleware actually runs inside Ream.
-	const appSpecifier = "@c9up/ream/services/app";
-	const appMod: { default: { container: { resolve(key: unknown): unknown } } } =
-		await import(appSpecifier);
-	const resolved = appMod.default.container.resolve(BLACKHOLE_KEY);
+	// Resolve the Blackhole instance from the request's IoC resolver
+	// (`ctx.containerResolver`, Adonis idiom) — reading from the context Ream
+	// hands us, NOT by importing `@c9up/ream/services/app`. That keeps blackhole
+	// framework-agnostic at runtime while still builds standalone.
+	const resolved = ctx.containerResolver?.make(BLACKHOLE_KEY);
 	if (!isBlackhole(resolved)) {
 		throw new Error(
-			"[BLACKHOLE_NOT_REGISTERED] BlackholeProvider must register BLACKHOLE_KEY before the middleware runs.",
+			"[BLACKHOLE_NOT_REGISTERED] BlackholeProvider must register BLACKHOLE_KEY before the middleware runs, and the host must expose ctx.containerResolver.",
 		);
 	}
 	const bh = resolved;

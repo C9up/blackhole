@@ -57,6 +57,7 @@ interface NativeModule {
 		paramPollution?: boolean,
 		csrfExceptRoutes?: string[],
 		csrfMethods?: string[],
+		csrfSecret?: string,
 	) => NativeBlackhole;
 }
 
@@ -277,6 +278,13 @@ export interface BlackholeOptions {
 	securityHeaders?: SecurityHeadersConfig | false;
 	/** Cross-Origin Resource Sharing policy. Omit to leave CORS unmanaged. */
 	cors?: CorsConfig;
+	/**
+	 * HMAC secret used to **sign** CSRF tokens (signed double-submit). Pass the
+	 * app's `APP_KEY`. Required when CSRF is enabled — without it an attacker who
+	 * can plant a cookie (sibling subdomain / MITM) could forge a valid pair.
+	 * Every instance must share the same secret (stateless horizontal scale).
+	 */
+	secret?: string;
 }
 
 export interface CheckResult {
@@ -331,6 +339,17 @@ function resolveCsrf(csrf: boolean | CsrfConfig | undefined): {
 	const cfg: CsrfConfig =
 		typeof csrf === "boolean" ? { enabled: csrf } : (csrf ?? {});
 	const cookie = cfg.cookie ?? {};
+	// The XSRF-TOKEN cookie MUST stay readable by JS for the double-submit flow
+	// (the SPA reads it and echoes X-XSRF-TOKEN). Setting httpOnly breaks that —
+	// every non-form POST would 403. Allow it (all-SSR apps use the _csrf field)
+	// but make the footgun loud.
+	if (cookie.httpOnly === true) {
+		process.stderr.write(
+			"[blackhole] WARNING: csrf.cookie.httpOnly=true makes XSRF-TOKEN unreadable by JS. " +
+				"SPA/RPC clients can't echo X-XSRF-TOKEN → their POSTs will 403. " +
+				"Only set this when every client is server-rendered (token via the _csrf field).\n",
+		);
+	}
 	return {
 		enabled: cfg.enabled ?? true,
 		exceptRoutes: cfg.exceptRoutes ?? [],
@@ -339,7 +358,9 @@ function resolveCsrf(csrf: boolean | CsrfConfig | undefined): {
 			path: cookie.path ?? "/",
 			sameSite: cookie.sameSite ?? "lax",
 			httpOnly: cookie.httpOnly ?? false,
-			...(cookie.secure ? { secure: true } : {}),
+			// Default Secure from the environment (parity with the session cookie),
+			// instead of leaving it off unless explicitly opted in.
+			secure: cookie.secure ?? process.env.NODE_ENV === "production",
 		},
 	};
 }
@@ -358,6 +379,16 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 	}
 
 	const csrf = resolveCsrf(options.csrf);
+	// Fail closed: signed double-submit needs a secret. Silently falling back to
+	// an unsigned token (or a per-process ephemeral key that breaks multi-instance
+	// verification) would be a quiet downgrade — exactly what we refuse to ship.
+	if (csrf.enabled && !options.secret) {
+		throw new Error(
+			"[blackhole] CSRF is enabled but no `secret` was provided. Pass your APP_KEY as " +
+				"`secret` so CSRF tokens are signed (signed double-submit). Disable with " +
+				"`csrf: false` only if you have an alternative CSRF defense.",
+		);
+	}
 	const filter = new native.Blackhole(
 		options.xss ?? true,
 		csrf.enabled,
@@ -367,6 +398,7 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		options.paramPollution ?? true,
 		csrf.exceptRoutes,
 		csrf.methods,
+		options.secret,
 	);
 
 	const baseHeaders = computeSecurityHeaders(options.securityHeaders);

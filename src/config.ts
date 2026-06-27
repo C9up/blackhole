@@ -31,6 +31,12 @@ export interface BlackholeConfig {
 	securityHeaders?: SecurityHeadersConfig | false;
 	/** Cross-Origin Resource Sharing policy. Omit to leave CORS unmanaged. */
 	cors?: CorsConfig;
+	/**
+	 * HMAC secret for signing CSRF tokens (signed double-submit). Set to your
+	 * `APP_KEY` — e.g. `secret: env.get('APP_KEY')`. Required when CSRF is on.
+	 * Falls back to `process.env.APP_KEY` if omitted.
+	 */
+	secret?: string;
 }
 
 /** Typed config helper — identity function for editor inference. */

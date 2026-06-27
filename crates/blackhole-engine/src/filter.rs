@@ -18,6 +18,9 @@ pub struct BlackholeConfig {
     pub csrf_except_routes: Vec<String>,
     /// HTTP methods that require CSRF (empty = unsafe-verb default).
     pub csrf_methods: Vec<String>,
+    /// HMAC secret for signing CSRF tokens (the app's `APP_KEY`). Empty falls
+    /// back to a per-process ephemeral key (single-instance dev safety net).
+    pub csrf_secret: Vec<u8>,
 }
 
 impl Default for BlackholeConfig {
@@ -30,6 +33,7 @@ impl Default for BlackholeConfig {
             param_pollution: true,
             csrf_except_routes: Vec::new(),
             csrf_methods: Vec::new(),
+            csrf_secret: Vec::new(),
         }
     }
 }
@@ -46,6 +50,7 @@ impl BlackholeFilter {
         let csrf_validator = CsrfValidator::with_routing(
             config.csrf_except_routes.clone(),
             config.csrf_methods.clone(),
+            config.csrf_secret.clone(),
         );
         Self {
             config,

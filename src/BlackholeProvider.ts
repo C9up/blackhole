@@ -41,6 +41,11 @@ export default class BlackholeProvider {
 				paramPollution: config.paramPollution,
 				securityHeaders: config.securityHeaders,
 				cors: config.cors,
+				// Sign CSRF tokens with the app secret. Fall back to APP_KEY so the
+				// common case (no explicit `secret` in config/blackhole.ts) still
+				// gets signed tokens; createBlackhole throws if CSRF is on yet
+				// neither is set.
+				secret: config.secret ?? process.env.APP_KEY,
 			});
 		});
 	}

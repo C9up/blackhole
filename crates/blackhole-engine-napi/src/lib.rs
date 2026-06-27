@@ -12,7 +12,7 @@ pub struct Blackhole {
 #[napi]
 impl Blackhole {
     #[napi(constructor)]
-    pub fn new(xss_enabled: Option<bool>, csrf_enabled: Option<bool>, rate_limit_max: Option<u32>, rate_limit_window: Option<u32>, path_traversal: Option<bool>, param_pollution: Option<bool>, csrf_except_routes: Option<Vec<String>>, csrf_methods: Option<Vec<String>>) -> Self {
+    pub fn new(xss_enabled: Option<bool>, csrf_enabled: Option<bool>, rate_limit_max: Option<u32>, rate_limit_window: Option<u32>, path_traversal: Option<bool>, param_pollution: Option<bool>, csrf_except_routes: Option<Vec<String>>, csrf_methods: Option<Vec<String>>, csrf_secret: Option<String>) -> Self {
         let rate_limit = match (rate_limit_max, rate_limit_window) {
             (Some(max), Some(window)) => Some((max, window as u64)),
             _ => None,
@@ -26,6 +26,7 @@ impl Blackhole {
                 param_pollution: param_pollution.unwrap_or(true),
                 csrf_except_routes: csrf_except_routes.unwrap_or_default(),
                 csrf_methods: csrf_methods.unwrap_or_default(),
+                csrf_secret: csrf_secret.map(String::into_bytes).unwrap_or_default(),
             }),
         }
     }

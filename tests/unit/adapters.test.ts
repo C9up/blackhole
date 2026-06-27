@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { blackholeExpress } from "../../src/express.js";
 import { blackholeFastify } from "../../src/fastify.js";
 import { createBlackhole } from "../../src/index.js";
+const SECRET = "test-app-key-32-bytes-long-aaaaaa";
 
 // ── Express adapter ──────────────────────────────────────────
 
@@ -83,7 +84,7 @@ function mockExpress(opts: {
 
 describe("blackhole > blackholeExpress", () => {
 	it("allows a GET and seeds the XSRF-TOKEN cookie + req.csrfToken", () => {
-		const mw = blackholeExpress({ csrf: true });
+		const mw = blackholeExpress({ csrf: true, secret: SECRET });
 		const { req, res } = mockExpress({ method: "GET" });
 		let nextCalled = false;
 		mw(req, res, () => {
@@ -96,7 +97,7 @@ describe("blackhole > blackholeExpress", () => {
 	});
 
 	it("rejects a POST without a CSRF token (403) and does not call next", () => {
-		const mw = blackholeExpress({ csrf: true });
+		const mw = blackholeExpress({ csrf: true, secret: SECRET });
 		const { req, res, spy } = mockExpress({ method: "POST" });
 		let nextCalled = false;
 		mw(req, res, () => {
@@ -108,8 +109,8 @@ describe("blackhole > blackholeExpress", () => {
 	});
 
 	it("allows a POST when the XSRF-TOKEN cookie matches the X-XSRF-TOKEN header", () => {
-		const token = createBlackhole().generateCsrfToken();
-		const mw = blackholeExpress({ csrf: true });
+		const token = createBlackhole({ secret: SECRET }).generateCsrfToken();
+		const mw = blackholeExpress({ csrf: true, secret: SECRET });
 		const { req, res } = mockExpress({
 			method: "POST",
 			headers: { cookie: `XSRF-TOKEN=${token}`, "x-xsrf-token": token },
@@ -243,7 +244,7 @@ function mockReply(): {
 describe("blackhole > blackholeFastify", () => {
 	it("rejects a POST without a CSRF token in preValidation", async () => {
 		const { preValidation } = await registerFastify(
-			blackholeFastify({ csrf: true }),
+			blackholeFastify({ csrf: true, secret: SECRET }),
 		);
 		const { reply, spy } = mockReply();
 		const request: FastifyReqLike = {
@@ -259,7 +260,7 @@ describe("blackhole > blackholeFastify", () => {
 
 	it("seeds request.csrfToken + the XSRF-TOKEN cookie on a GET", async () => {
 		const { preValidation } = await registerFastify(
-			blackholeFastify({ csrf: true }),
+			blackholeFastify({ csrf: true, secret: SECRET }),
 		);
 		const { reply } = mockReply();
 		const request: FastifyReqLike = {
@@ -292,7 +293,7 @@ describe("blackhole > blackholeFastify", () => {
 describe("blackhole > audit 2026-06-13 fixes", () => {
 	it("Fastify: accepts a POST whose _csrf form field matches the cookie (form CSRF works at preValidation)", async () => {
 		const { preValidation } = await registerFastify(
-			blackholeFastify({ csrf: true }),
+			blackholeFastify({ csrf: true, secret: SECRET }),
 		);
 		// Mint a token + XSRF-TOKEN cookie via a GET.
 		const mint = mockReply();
@@ -321,7 +322,7 @@ describe("blackhole > audit 2026-06-13 fixes", () => {
 	});
 
 	it("Express: appends the XSRF-TOKEN cookie without clobbering a prior Set-Cookie", () => {
-		const mw = blackholeExpress({ csrf: true });
+		const mw = blackholeExpress({ csrf: true, secret: SECRET });
 		const { req, res } = mockExpress({ method: "GET" });
 		res.append("set-cookie", "session=abc"); // queued by an earlier middleware
 		let nextCalled = false;

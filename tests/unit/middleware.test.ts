@@ -4,6 +4,7 @@ import BlackholeProvider, {
 	type BlackholeAppContext,
 } from "../../src/BlackholeProvider.js";
 import { createBlackhole } from "../../src/index.js";
+const SECRET = "test-app-key-32-bytes-long-aaaaaa";
 import BlackholeMiddleware, {
 	blackholeMiddleware,
 	type ReamContext,
@@ -13,7 +14,7 @@ import BlackholeMiddleware, {
 // (Ream's per-request IoC resolver) — NOT from a `@c9up/ream` import. One shared
 // instance, wired into a fake resolver per context, so every test sees the same
 // config and the suite stays agnostic / standalone.
-const bh = createBlackhole();
+const bh = createBlackhole({ secret: SECRET });
 
 interface ResponseSpy {
 	status?: number;
@@ -206,22 +207,57 @@ describe("blackhole > BlackholeProvider", () => {
 	});
 
 	it("falls back to an empty config when 'blackhole' key is absent", () => {
-		const bindings = new Map<unknown, () => unknown>();
-		const app: BlackholeAppContext = {
-			container: {
-				singleton(token, factory) {
-					bindings.set(token, factory);
+		// CSRF is on by default and signing needs a secret. The provider falls
+		// back to APP_KEY, which every real app sets — so an absent `blackhole`
+		// config key still boots. Without ANY secret it fail-closes (by design).
+		const prev = process.env.APP_KEY;
+		process.env.APP_KEY = "test-app-key-32-bytes-long-aaaaaa";
+		try {
+			const bindings = new Map<unknown, () => unknown>();
+			const app: BlackholeAppContext = {
+				container: {
+					singleton(token, factory) {
+						bindings.set(token, factory);
+					},
 				},
-			},
-			config: {
-				get<T = unknown>(): T | undefined {
-					return undefined;
+				config: {
+					get<T = unknown>(): T | undefined {
+						return undefined;
+					},
 				},
-			},
-		};
-		new BlackholeProvider(app).register();
-		const instance = bindings.get(BLACKHOLE_KEY)?.();
-		expect(instance).toBeDefined();
+			};
+			new BlackholeProvider(app).register();
+			const instance = bindings.get(BLACKHOLE_KEY)?.();
+			expect(instance).toBeDefined();
+		} finally {
+			if (prev === undefined) delete process.env.APP_KEY;
+			else process.env.APP_KEY = prev;
+		}
+	});
+
+	it("fail-closes when CSRF is on but no secret and no APP_KEY", () => {
+		const prev = process.env.APP_KEY;
+		delete process.env.APP_KEY;
+		try {
+			const bindings = new Map<unknown, () => unknown>();
+			const app: BlackholeAppContext = {
+				container: {
+					singleton(token, factory) {
+						bindings.set(token, factory);
+					},
+				},
+				config: {
+					get<T = unknown>(): T | undefined {
+						return undefined;
+					},
+				},
+			};
+			new BlackholeProvider(app).register();
+			// Resolving the singleton must throw — no silent unsigned-CSRF downgrade.
+			expect(() => bindings.get(BLACKHOLE_KEY)?.()).toThrow(/secret/);
+		} finally {
+			if (prev !== undefined) process.env.APP_KEY = prev;
+		}
 	});
 });
 

@@ -53,6 +53,10 @@ function makeReamContext(opts: {
 			spy.cookie[name] = value;
 			return response;
 		},
+		plainCookie(name, value) {
+			spy.cookie[name] = value;
+			return response;
+		},
 		header(name, value) {
 			(spy.header as Record<string, string>)[name.toLowerCase()] = value;
 			if (name.toLowerCase() === "content-type") contentType = value;

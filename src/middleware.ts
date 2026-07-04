@@ -80,6 +80,17 @@ export interface ReamContext {
 			value: string,
 			options?: Record<string, unknown>,
 		): unknown;
+		/**
+		 * Unsigned cookie (Ream `plainCookie`). The XSRF-TOKEN is already an HMAC
+		 * signed double-submit token, so it must NOT be re-signed by the host's
+		 * default `cookie()` — the browser must read the raw value back for the
+		 * double-submit check.
+		 */
+		plainCookie(
+			name: string,
+			value: string,
+			options?: Record<string, unknown>,
+		): unknown;
 		getBody(): string;
 		getHeader(name: string): string | undefined;
 		setBody(body: string): void;
@@ -153,7 +164,10 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 	ctx.request.csrfToken = outcome.csrfToken;
 	ctx.store.set("csrfToken", outcome.csrfToken);
 	if (outcome.setCookie) {
-		ctx.response.cookie(
+		// plainCookie: the XSRF token is already HMAC-signed by blackhole; the
+		// browser must read the raw value for the double-submit check, so it must
+		// not be re-signed by the host's default (signing) `cookie()`.
+		ctx.response.plainCookie(
 			outcome.setCookie.name,
 			outcome.setCookie.value,
 			outcome.setCookie.options,

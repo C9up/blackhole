@@ -38,7 +38,7 @@ checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 
 [[package]]
 name = "blackhole-engine"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "ammonia",
  "base64",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "blackhole-engine-napi"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "blackhole-engine",
  "napi",

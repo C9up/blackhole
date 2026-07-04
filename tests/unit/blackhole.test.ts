@@ -50,7 +50,10 @@ describe("blackhole", () => {
 	});
 
 	it("skips CSRF for an exceptRoutes path (webhooks)", () => {
-		const bh = createBlackhole({ csrf: { exceptRoutes: ["/api/webhooks/*"] }, secret: SECRET });
+		const bh = createBlackhole({
+			csrf: { exceptRoutes: ["/api/webhooks/*"] },
+			secret: SECRET,
+		});
 		const result = bh.check({
 			method: "POST",
 			path: "/api/webhooks/stripe",
@@ -132,13 +135,26 @@ describe("blackhole", () => {
 		expect(bh.sanitizeResponse(json, "application/json")).toBe(json);
 	});
 
+	it("does NOT sanitize a text/plain response (robots.txt served verbatim)", () => {
+		// text/plain is never parsed as HTML (nosniff), so escaping it would only
+		// corrupt the body. Newlines/slashes/spaces must reach the client as-is.
+		const bh = createBlackhole({ secret: SECRET });
+		const robots = "User-agent: *\nDisallow: /\n";
+		expect(bh.sanitizeResponse(robots, "text/plain; charset=utf-8")).toBe(
+			robots,
+		);
+	});
+
 	it("computes security headers (Helmet-style)", () => {
 		const h = createBlackhole({ secret: SECRET }).securityHeaders();
 		expect(h["x-content-type-options"]).toBe("nosniff");
 		expect(h["x-frame-options"]).toBe("SAMEORIGIN");
 		expect(h["content-security-policy"]).toBe("default-src 'self'");
 		expect(
-			createBlackhole({ securityHeaders: false, secret: SECRET }).securityHeaders(),
+			createBlackhole({
+				securityHeaders: false,
+				secret: SECRET,
+			}).securityHeaders(),
 		).toEqual({});
 	});
 
@@ -196,7 +212,9 @@ describe("blackhole", () => {
 	});
 
 	it("CORS: undefined when not configured; throws on credentials + wildcard", () => {
-		expect(createBlackhole({ secret: SECRET }).cors("https://x.test", "GET")).toBeUndefined();
+		expect(
+			createBlackhole({ secret: SECRET }).cors("https://x.test", "GET"),
+		).toBeUndefined();
 		expect(() =>
 			createBlackhole({
 				cors: { origin: "*", credentials: true },

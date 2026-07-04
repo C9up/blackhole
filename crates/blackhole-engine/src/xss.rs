@@ -55,13 +55,12 @@ pub fn sanitize_text(input: &str) -> String {
 }
 
 /// Sanitize a response body based on content type.
-/// - text/html: uses ammonia HTML sanitizer (parser-based, preserves custom tags)
-/// - text/plain: uses ammonia clean_text (entity escaping)
-/// - Other types (JSON, binary, etc.): returned unmodified
-/// Sanitize a response body based on content type.
-/// - `text/html`: ammonia HTML sanitizer (parser-based, preserves safe tags)
-/// - `text/plain`: ammonia `clean_text` (entity escaping)
-/// - Other types (JSON, binary, etc.): returned unmodified
+/// - `text/html`: ammonia HTML sanitizer (parser-based, preserves safe wrapper
+///   tags; a full document opening with `<!doctype>`/`<html>` passes through).
+/// - Everything else (`text/plain`, JSON, CSV, binary, …): returned unmodified.
+///   A non-HTML body is never parsed as markup by the browser (blackhole sets
+///   `X-Content-Type-Options: nosniff` by default), so there is nothing to
+///   escape — and escaping would corrupt legitimate plain-text bodies.
 ///
 /// Standalone version — takes `(body, content_type)` instead of a framework
 /// response struct, so it works with any HTTP server.
@@ -79,9 +78,12 @@ pub fn sanitize_response(body: &str, content_type: &str) -> String {
             return body.to_string();
         }
         sanitize_html(body)
-    } else if ct.starts_with("text/plain") {
-        sanitize_text(body)
     } else {
+        // Non-HTML content types (text/plain, JSON, CSV, binary, …) are never
+        // interpreted as markup by the browser — with `X-Content-Type-Options:
+        // nosniff` (blackhole's default) there is no XSS vector to escape.
+        // Entity-escaping them would only corrupt legitimate bodies
+        // (robots.txt, plain-text APIs, CSV, …) for zero security gain.
         body.to_string()
     }
 }
@@ -208,9 +210,12 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_response_text_plain() {
-        let result = sanitize_response("User said: <script>xss</script>", "text/plain");
-        assert!(result.contains("&lt;script&gt;"));
+    fn test_sanitize_response_text_plain_verbatim() {
+        // text/plain is never parsed as HTML by the browser (nosniff), so it is
+        // served verbatim — escaping would corrupt robots.txt, CSV, plain text.
+        let body = "User-agent: *\nDisallow: /\n";
+        let result = sanitize_response(body, "text/plain; charset=utf-8");
+        assert_eq!(result, body, "text/plain must be returned unmodified");
     }
 
     #[test]

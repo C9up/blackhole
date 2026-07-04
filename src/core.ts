@@ -156,9 +156,11 @@ export function runRequestPhase(
 
 /**
  * Response-phase security: protective headers (with the per-request CSP nonce
- * substituted) plus body sanitization. Only `text/html` and `text/plain`
- * bodies are sanitized; a server-rendered full document (`<!doctype>` / `<html>`)
- * is left intact (ammonia is for fragments, not whole documents).
+ * substituted) plus body sanitization. Only `text/html` bodies are sanitized;
+ * a server-rendered full document (`<!doctype>` / `<html>`) is left intact
+ * (ammonia is for fragments, not whole documents). Non-HTML bodies (text/plain,
+ * JSON, CSV, …) are served verbatim — the browser never parses them as markup
+ * (`X-Content-Type-Options: nosniff`), so there is nothing to escape.
  */
 export function runResponsePhase(
 	bh: Blackhole,
@@ -167,7 +169,7 @@ export function runResponsePhase(
 	const headers = bh.securityHeaders(input.cspNonce);
 	let body = input.body;
 	const ct = input.contentType.toLowerCase();
-	if (body && (ct.startsWith("text/html") || ct.startsWith("text/plain"))) {
+	if (body && ct.startsWith("text/html")) {
 		const head = body.slice(0, 16).toLowerCase().trimStart();
 		const isFullDocument =
 			head.startsWith("<!doctype") || head.startsWith("<html");

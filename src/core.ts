@@ -21,7 +21,13 @@ export interface CoreRequest {
 
 /** Result of the request phase; the adapter applies it to its response/request. */
 export type RequestOutcome =
-	| { kind: "reject"; status: number; body: unknown }
+	| {
+			kind: "reject";
+			status: number;
+			body: unknown;
+			/** Extra headers to set on the rejection (e.g. `Retry-After` on a 429). */
+			headers?: Record<string, string>;
+	  }
 	| {
 			kind: "preflight";
 			status: number;
@@ -117,6 +123,7 @@ export function runRequestPhase(
 		req.headers.origin ?? "",
 		req.method,
 		req.headers["access-control-request-method"],
+		req.headers["access-control-request-headers"],
 	);
 	const corsHeaders = cors?.headers ?? {};
 	const varyOrigin = cors?.varyOrigin ?? false;
@@ -137,6 +144,7 @@ export function runRequestPhase(
 			kind: "reject",
 			status: result.status ?? 500,
 			body: safeJsonParse(result.body),
+			headers: result.headers,
 		};
 	}
 

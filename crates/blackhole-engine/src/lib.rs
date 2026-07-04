@@ -40,6 +40,8 @@ pub struct Response {
     pub status: u16,
     pub body: String,
     pub content_type: String,
+    /// Extra response headers (e.g. `Retry-After` / `X-RateLimit-*` on a 429).
+    pub headers: Vec<(String, String)>,
 }
 
 impl Response {
@@ -48,6 +50,17 @@ impl Response {
             status,
             body: body.to_string(),
             content_type: "application/json".to_string(),
+            headers: Vec::new(),
+        }
+    }
+
+    /// JSON response carrying extra headers (rate-limit backoff signals).
+    pub fn json_with_headers(status: u16, body: &str, headers: Vec<(String, String)>) -> Self {
+        Self {
+            status,
+            body: body.to_string(),
+            content_type: "application/json".to_string(),
+            headers,
         }
     }
 }

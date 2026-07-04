@@ -149,7 +149,10 @@ describe("blackhole", () => {
 		const h = createBlackhole({ secret: SECRET }).securityHeaders();
 		expect(h["x-content-type-options"]).toBe("nosniff");
 		expect(h["x-frame-options"]).toBe("SAMEORIGIN");
-		expect(h["content-security-policy"]).toBe("default-src 'self'");
+		// Hardened baseline: base-uri/form-action/object-src don't fall back to default-src.
+		expect(h["content-security-policy"]).toBe(
+			"default-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none'",
+		);
 		expect(
 			createBlackhole({
 				securityHeaders: false,

@@ -5,11 +5,16 @@
 //! must hold: (1) the cookie token equals the token the client echoes back
 //! (the classic double-submit — an attacker can't set the `X-XSRF-TOKEN`
 //! header cross-site), AND (2) the token carries a valid HMAC signature under
-//! the server secret. (2) is what makes this *signed* double-submit (OWASP
-//! recommended): an attacker who injects an arbitrary `XSRF-TOKEN` cookie from
-//! a sibling subdomain / MITM can no longer forge a token, because they don't
-//! hold the secret. A plain (unsigned) double-submit would accept any
-//! self-consistent pair — this one does not.
+//! the server secret. (2) is what makes this *signed* double-submit: an
+//! attacker cannot forge a brand-new valid token because they don't hold the
+//! secret. A plain (unsigned) double-submit would accept any self-consistent
+//! pair — this one does not.
+//!
+//! The signature alone does NOT bind the token to a user, so it does not by
+//! itself stop an attacker who plants a token they were *legitimately* issued
+//! (sibling-subdomain `Set-Cookie` / MITM on an http subdomain). That gap is
+//! closed by [`CsrfValidator::verify_origin`] — a same-origin `Origin`/`Referer`
+//! check on unsafe verbs, applied before the token check.
 //!
 //! Because validation is still purely cryptographic on values the request
 //! carries, it scales horizontally with **no shared store** — every instance
@@ -46,6 +51,10 @@ pub struct CsrfValidator {
     pub except_routes: Vec<String>,
     /// HTTP methods that require validation (upper-case).
     pub methods: Vec<String>,
+    /// Origins allowed to make cross-origin state-changing requests, in addition
+    /// to same-origin (always allowed). Matched by host
+    /// (`https://app.example.com` or `app.example.com`).
+    pub trusted_origins: Vec<String>,
     /// HMAC-SHA256 key for signing tokens. Seeded from the app's `APP_KEY` so
     /// every instance signs/verifies identically (stateless horizontal scale).
     /// Never empty: an empty input is replaced with a per-process ephemeral key
@@ -65,15 +74,22 @@ impl CsrfValidator {
             body_field: DEFAULT_BODY_FIELD.to_string(),
             except_routes: Vec::new(),
             methods: DEFAULT_METHODS.iter().map(|s| s.to_string()).collect(),
+            trusted_origins: Vec::new(),
             secret: resolve_secret(secret),
         }
     }
 
-    /// Build a validator with custom exempt routes + guarded methods + secret.
-    /// Empty `methods` falls back to the unsafe-verb default.
-    pub fn with_routing(except_routes: Vec<String>, methods: Vec<String>, secret: Vec<u8>) -> Self {
+    /// Build a validator with custom exempt routes + guarded methods + trusted
+    /// origins + secret. Empty `methods` falls back to the unsafe-verb default.
+    pub fn with_routing(
+        except_routes: Vec<String>,
+        methods: Vec<String>,
+        trusted_origins: Vec<String>,
+        secret: Vec<u8>,
+    ) -> Self {
         let mut v = Self::new(secret);
         v.except_routes = except_routes;
+        v.trusted_origins = trusted_origins;
         if !methods.is_empty() {
             v.methods = methods.iter().map(|m| m.to_ascii_uppercase()).collect();
         }
@@ -151,6 +167,57 @@ impl CsrfValidator {
             None => path == pat,
         })
     }
+
+    /// Defense-in-depth Origin/Referer check for state-changing requests.
+    ///
+    /// The signed double-submit token proves the server minted it, but NOT that
+    /// it was minted for *this* user — an attacker who plants a token they were
+    /// legitimately issued (sibling-subdomain `Set-Cookie`, MITM on an http
+    /// subdomain) passes the token check. Verifying that the request's `Origin`
+    /// (or `Referer` fallback) is same-origin with the `Host` header closes that
+    /// gap: the attacker's page has a different origin.
+    ///
+    /// Returns `true` (allow) when neither header is present — non-browser API
+    /// clients omit them, and the token check still applies. Returns `false`
+    /// only when a present Origin/Referer is cross-origin and not trusted.
+    pub fn verify_origin(
+        &self,
+        host: Option<&str>,
+        origin: Option<&str>,
+        referer: Option<&str>,
+    ) -> bool {
+        let source = match origin.or(referer) {
+            Some(s) if !s.is_empty() => s,
+            _ => return true, // no browser-set header → fall through to the token check
+        };
+        let source_host = match origin_host(source) {
+            Some(h) => h,
+            None => return false, // malformed Origin/Referer on an unsafe verb
+        };
+        if let Some(h) = host {
+            if source_host.eq_ignore_ascii_case(h) {
+                return true;
+            }
+        }
+        self.trusted_origins.iter().any(|trusted| {
+            origin_host(trusted)
+                .map(|th| th.eq_ignore_ascii_case(source_host))
+                .unwrap_or(false)
+        })
+    }
+}
+
+/// Extract the `host[:port]` from an Origin / Referer / trusted-origin value,
+/// stripping any `scheme://` prefix and trailing path. Scheme is intentionally
+/// ignored (an http→https downgrade is HSTS's job, not CSRF's).
+fn origin_host(value: &str) -> Option<&str> {
+    let after_scheme = value.split_once("://").map(|(_, rest)| rest).unwrap_or(value);
+    let host = after_scheme.split('/').next().unwrap_or(after_scheme);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
 }
 
 impl Default for CsrfValidator {
@@ -191,7 +258,7 @@ mod tests {
     }
 
     fn vd_routed(except: Vec<String>, methods: Vec<String>) -> CsrfValidator {
-        CsrfValidator::with_routing(except, methods, TEST_SECRET.to_vec())
+        CsrfValidator::with_routing(except, methods, Vec::new(), TEST_SECRET.to_vec())
     }
 
     #[test]
@@ -301,6 +368,37 @@ mod tests {
         let v = vd_routed(Vec::new(), vec!["DELETE".to_string()]);
         assert!(v.requires_csrf("DELETE"));
         assert!(!v.requires_csrf("POST"));
+    }
+
+    #[test]
+    fn verify_origin_allows_same_origin_and_missing_headers() {
+        let v = vd();
+        // No Origin/Referer → allow (non-browser client; token check still applies).
+        assert!(v.verify_origin(Some("app.test"), None, None));
+        // Same-origin Origin → allow.
+        assert!(v.verify_origin(Some("app.test"), Some("https://app.test"), None));
+        // Same-origin via Referer fallback → allow.
+        assert!(v.verify_origin(Some("app.test"), None, Some("https://app.test/page")));
+    }
+
+    #[test]
+    fn verify_origin_rejects_cross_origin() {
+        let v = vd();
+        assert!(!v.verify_origin(Some("app.test"), Some("https://evil.test"), None));
+        // Malformed Origin on an unsafe verb → reject.
+        assert!(!v.verify_origin(Some("app.test"), Some("://"), None));
+    }
+
+    #[test]
+    fn verify_origin_allows_trusted_cross_origin() {
+        let v = CsrfValidator::with_routing(
+            Vec::new(),
+            Vec::new(),
+            vec!["https://admin.test".to_string()],
+            TEST_SECRET.to_vec(),
+        );
+        assert!(v.verify_origin(Some("app.test"), Some("https://admin.test"), None));
+        assert!(!v.verify_origin(Some("app.test"), Some("https://other.test"), None));
     }
 
     #[test]

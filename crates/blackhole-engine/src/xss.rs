@@ -1,25 +1,31 @@
 //! XSS sanitization utilities — powered by ammonia (html5ever parser).
 //!
-//! Uses a real HTML parser (same as Firefox/Servo) to neutralize XSS vectors.
-//! Custom HTML tags and web components are preserved.
-//! Never double-encodes existing HTML entities.
+//! Uses a real HTML parser (same as Firefox/Servo) to neutralize XSS vectors in
+//! UNTRUSTED HTML *fragments*. This is an allow-LIST sanitizer: ammonia keeps a
+//! curated set of safe tags/attributes and UNWRAPS anything else — including
+//! custom elements (`<my-widget>`) and non-allowlisted HTML5 tags. Do not rely
+//! on it to pass trusted markup through unchanged; it reparses + re-serialises,
+//! so exact bytes (inline SVG, `<pre>`, SRI-hashed inline content) may change.
+//! That's why the response pipeline skips full documents (`<!doctype>`/`<html>`)
+//! and only sanitises fragments. Never double-encodes existing HTML entities.
 //!
 //! @implements FR44
 
 use std::collections::HashSet;
 
-/// Build a permissive ammonia sanitizer that:
-/// - Allows ALL tags (including custom components like <UserCard>, <my-widget>)
-/// - Removes dangerous elements: <script>, <style> (content stripped entirely)
-/// - Strips all event handler attributes (on*)
-/// - Strips javascript: URIs from href/src/action
-/// - Preserves safe attributes (class, id, style, data-*, aria-*)
+/// Build the ammonia sanitizer (safe allow-list) used for untrusted fragments:
+/// - Keeps ammonia's default allow-list of safe tags; UNWRAPS everything else
+///   (custom elements, non-allowlisted HTML5 tags) — NOT an "allow all tags" pass.
+/// - Removes dangerous elements with their content: <script>, <style>, <iframe>,
+///   <object>, <embed>.
+/// - Strips all event-handler attributes (on*) and `javascript:` URIs (ammonia
+///   default: only explicitly-allowed attributes/URIs survive).
+/// - Allows a set of safe generic attributes (class, id, style, data-*, aria-*).
 fn build_html_sanitizer() -> ammonia::Builder<'static> {
     let mut builder = ammonia::Builder::default();
 
-    // Allow all tags by using a very permissive set.
-    // ammonia's default allowlist is restrictive — we override it.
-    // We add common HTML5 tags + leave clean_content_tags to strip <script>/<style>.
+    // ammonia's default is a curated SAFE allow-list — we keep it and only
+    // tighten it (clean_content_tags strips <script>/<style>/… with content).
     builder
         // Strip <script> and <style> entirely (content removed, not just tags)
         .clean_content_tags(HashSet::from(["script", "style", "iframe", "object", "embed"]))
@@ -37,12 +43,13 @@ fn build_html_sanitizer() -> ammonia::Builder<'static> {
     builder
 }
 
-/// Sanitize an HTML string using ammonia (html5ever parser).
+/// Sanitize an untrusted HTML fragment using ammonia (html5ever parser).
 ///
 /// - Strips `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>` (with content)
 /// - Strips all `on*` event handler attributes
 /// - Strips `javascript:` URIs
-/// - Preserves all other tags including custom web components
+/// - Keeps ammonia's safe tag allow-list and UNWRAPS anything else (custom
+///   elements / non-allowlisted tags are removed, not preserved)
 /// - Never double-encodes existing HTML entities
 pub fn sanitize_html(input: &str) -> String {
     build_html_sanitizer().clean(input).to_string()

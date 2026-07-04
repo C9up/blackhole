@@ -33,8 +33,8 @@ export interface BlackholeConfig {
 	cors?: CorsConfig;
 	/**
 	 * HMAC secret for signing CSRF tokens (signed double-submit). Set to your
-	 * `APP_KEY` — e.g. `secret: env.get('APP_KEY')`. Required when CSRF is on.
-	 * Falls back to `process.env.APP_KEY` if omitted.
+	 * `APP_KEY` — e.g. `secret: env.get('APP_KEY')`. **Required** when CSRF is on:
+	 * `createBlackhole` throws if it's missing (fail-closed, no silent fallback).
 	 */
 	secret?: string;
 }

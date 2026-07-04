@@ -18,6 +18,9 @@ pub struct BlackholeConfig {
     pub csrf_except_routes: Vec<String>,
     /// HTTP methods that require CSRF (empty = unsafe-verb default).
     pub csrf_methods: Vec<String>,
+    /// Cross-origins trusted for state-changing requests (same-origin is always
+    /// allowed). Empty = same-origin only.
+    pub csrf_trusted_origins: Vec<String>,
     /// HMAC secret for signing CSRF tokens (the app's `APP_KEY`). Empty falls
     /// back to a per-process ephemeral key (single-instance dev safety net).
     pub csrf_secret: Vec<u8>,
@@ -33,6 +36,7 @@ impl Default for BlackholeConfig {
             param_pollution: true,
             csrf_except_routes: Vec::new(),
             csrf_methods: Vec::new(),
+            csrf_trusted_origins: Vec::new(),
             csrf_secret: Vec::new(),
         }
     }
@@ -50,6 +54,7 @@ impl BlackholeFilter {
         let csrf_validator = CsrfValidator::with_routing(
             config.csrf_except_routes.clone(),
             config.csrf_methods.clone(),
+            config.csrf_trusted_origins.clone(),
             config.csrf_secret.clone(),
         );
         Self {
@@ -72,8 +77,21 @@ impl BlackholeFilter {
             if request.remote_addr.is_empty() {
                 return FilterResult::Reject(Response::json(400, r#"{"error":{"code":"MISSING_IP","message":"Cannot rate-limit: no remote address"}}"#));
             }
-            if !limiter.check(&request.remote_addr) {
-                return FilterResult::Reject(Response::json(429, r#"{"error":{"code":"RATE_LIMITED","message":"Too many requests"}}"#));
+            let outcome = limiter.check_detailed(&request.remote_addr);
+            if !outcome.allowed {
+                // Emit backoff signals so well-behaved clients + proxies honour
+                // the limit (Retry-After + X-RateLimit-* — parity with @adonisjs/limiter).
+                let headers = vec![
+                    ("Retry-After".to_string(), outcome.retry_after_secs.to_string()),
+                    ("X-RateLimit-Limit".to_string(), outcome.limit.to_string()),
+                    ("X-RateLimit-Remaining".to_string(), "0".to_string()),
+                    ("X-RateLimit-Reset".to_string(), outcome.retry_after_secs.to_string()),
+                ];
+                return FilterResult::Reject(Response::json_with_headers(
+                    429,
+                    r#"{"error":{"code":"RATE_LIMITED","message":"Too many requests"}}"#,
+                    headers,
+                ));
             }
         }
 
@@ -93,6 +111,21 @@ impl BlackholeFilter {
 
         let v = &self.csrf_validator;
         if self.config.csrf_enabled && v.requires_csrf(&request.method) && !v.is_excepted(&request.path) {
+            // Defense-in-depth: reject a state-changing request whose Origin /
+            // Referer is cross-origin (and not trusted) BEFORE the token check —
+            // this is what stops a planted-but-validly-signed token (sibling
+            // subdomain / MITM cookie injection) that the token check alone can't.
+            let find = |name: &str| {
+                request
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                    .map(|(_, v)| v.as_str())
+            };
+            if !v.verify_origin(find("host"), find("origin"), find("referer")) {
+                return FilterResult::Reject(Response::json(403, r#"{"error":{"code":"CSRF_ORIGIN_MISMATCH","message":"Cross-origin state-changing request rejected"}}"#));
+            }
+
             // Stateless double-submit: the token in the `XSRF-TOKEN` cookie must
             // match the one the client submits — via an `X-XSRF-TOKEN` /
             // `X-CSRF-TOKEN` header (SPA) or the `_csrf` form field (rendered form).
@@ -204,6 +237,48 @@ mod tests {
         headers.insert("x-csrf-token".into(), f.generate_csrf_token());
         let r = Request { method: "POST".into(), path: "/".into(), query: String::new(), headers, body: String::new(), remote_addr: "127.0.0.1".into() };
         assert!(matches!(f.check(r), FilterResult::Reject(_)));
+    }
+
+    #[test]
+    fn csrf_rejects_cross_origin_even_with_valid_token() {
+        // Defense-in-depth: a validly-signed, cookie-matching token is NOT enough
+        // if the request's Origin is cross-origin (planted-cookie attack).
+        let f = BlackholeFilter::new(BlackholeConfig::default());
+        let token = f.generate_csrf_token();
+        let mut headers = HashMap::new();
+        headers.insert("x-xsrf-token".into(), token.clone());
+        headers.insert("cookie".into(), format!("XSRF-TOKEN={}", token));
+        headers.insert("host".into(), "app.test".into());
+        headers.insert("origin".into(), "https://evil.test".into());
+        let r = Request { method: "POST".into(), path: "/".into(), query: String::new(), headers, body: String::new(), remote_addr: "127.0.0.1".into() };
+        assert!(matches!(f.check(r), FilterResult::Reject(_)));
+    }
+
+    #[test]
+    fn csrf_allows_same_origin_with_valid_token() {
+        let f = BlackholeFilter::new(BlackholeConfig::default());
+        let token = f.generate_csrf_token();
+        let mut headers = HashMap::new();
+        headers.insert("x-xsrf-token".into(), token.clone());
+        headers.insert("cookie".into(), format!("XSRF-TOKEN={}", token));
+        headers.insert("host".into(), "app.test".into());
+        headers.insert("origin".into(), "https://app.test".into());
+        let r = Request { method: "POST".into(), path: "/".into(), query: String::new(), headers, body: String::new(), remote_addr: "127.0.0.1".into() };
+        assert!(matches!(f.check(r), FilterResult::Allow(_)));
+    }
+
+    #[test]
+    fn rate_limit_reject_carries_retry_after() {
+        let f = BlackholeFilter::new(BlackholeConfig { rate_limit: Some((1, 60)), csrf_enabled: false, ..Default::default() });
+        assert!(matches!(f.check(req("GET", "/")), FilterResult::Allow(_)));
+        match f.check(req("GET", "/")) {
+            FilterResult::Reject(res) => {
+                assert_eq!(res.status, 429);
+                assert!(res.headers.iter().any(|(k, _)| k == "Retry-After"));
+                assert!(res.headers.iter().any(|(k, _)| k == "X-RateLimit-Limit"));
+            }
+            _ => panic!("should be rate-limited"),
+        }
     }
 
     #[test]

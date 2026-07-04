@@ -139,6 +139,10 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 	const outcome = runRequestPhase(bh, req);
 
 	if (outcome.kind === "reject") {
+		// Rate-limit rejections carry Retry-After / X-RateLimit-* so clients back off.
+		for (const [name, value] of Object.entries(outcome.headers ?? {})) {
+			ctx.response.header(name, value);
+		}
 		// Two-step: `.status(...).json(...)` chaining relies on a self-typed
 		// return the structural interface can't express. Splitting is equivalent.
 		ctx.response.status(outcome.status);

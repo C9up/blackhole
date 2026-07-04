@@ -104,6 +104,9 @@ export function blackholeExpress(options: BlackholeOptions = {}) {
 		const outcome = runRequestPhase(bh, coreReq);
 
 		if (outcome.kind === "reject") {
+			for (const [name, value] of Object.entries(outcome.headers ?? {})) {
+				res.setHeader(name, value);
+			}
 			res.status(outcome.status).json(outcome.body);
 			return;
 		}

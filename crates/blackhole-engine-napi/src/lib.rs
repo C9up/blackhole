@@ -12,7 +12,7 @@ pub struct Blackhole {
 #[napi]
 impl Blackhole {
     #[napi(constructor)]
-    pub fn new(xss_enabled: Option<bool>, csrf_enabled: Option<bool>, rate_limit_max: Option<u32>, rate_limit_window: Option<u32>, path_traversal: Option<bool>, param_pollution: Option<bool>, csrf_except_routes: Option<Vec<String>>, csrf_methods: Option<Vec<String>>, csrf_secret: Option<String>) -> Self {
+    pub fn new(xss_enabled: Option<bool>, csrf_enabled: Option<bool>, rate_limit_max: Option<u32>, rate_limit_window: Option<u32>, path_traversal: Option<bool>, param_pollution: Option<bool>, csrf_except_routes: Option<Vec<String>>, csrf_methods: Option<Vec<String>>, csrf_secret: Option<String>, csrf_trusted_origins: Option<Vec<String>>) -> Self {
         let rate_limit = match (rate_limit_max, rate_limit_window) {
             (Some(max), Some(window)) => Some((max, window as u64)),
             _ => None,
@@ -26,6 +26,7 @@ impl Blackhole {
                 param_pollution: param_pollution.unwrap_or(true),
                 csrf_except_routes: csrf_except_routes.unwrap_or_default(),
                 csrf_methods: csrf_methods.unwrap_or_default(),
+                csrf_trusted_origins: csrf_trusted_origins.unwrap_or_default(),
                 csrf_secret: csrf_secret.map(String::into_bytes).unwrap_or_default(),
             }),
         }
@@ -49,7 +50,9 @@ impl Blackhole {
                 Ok(serde_json::json!({ "allowed": true }))
             }
             Ok(blackhole_engine::FilterResult::Reject(res)) => {
-                Ok(serde_json::json!({ "allowed": false, "status": res.status, "body": res.body }))
+                let headers: std::collections::HashMap<String, String> =
+                    res.headers.into_iter().collect();
+                Ok(serde_json::json!({ "allowed": false, "status": res.status, "body": res.body, "headers": headers }))
             }
             Err(_) => Err(Error::from_reason("Internal panic in blackhole engine")),
         }

@@ -48,8 +48,19 @@ interface NativeBlackhole {
 		status?: number;
 		body?: string;
 		headers?: Record<string, string>;
+		rateLimit?: RateLimitMeta;
 	};
 	sanitizeResponse(body: string, contentType: string): string;
+}
+
+/** Rate-limit numbers the engine reports for `X-RateLimit-*` headers. */
+export interface RateLimitMeta {
+	/** Configured ceiling (`max`). */
+	limit: number;
+	/** Requests still permitted in the current window. */
+	remaining: number;
+	/** Seconds until a slot frees / the window resets for this key. */
+	resetSeconds: number;
 }
 
 interface NativeModule {
@@ -98,18 +109,68 @@ export interface SecurityHeadersConfig {
 	 * CSP keywords MUST be single-quoted (`'self'`, `'none'`, `'unsafe-inline'`,
 	 * `'strict-dynamic'`, …). An unquoted keyword is parsed by the browser as a
 	 * host literal and silently breaks the policy — blackhole warns when it spots one.
+	 *
+	 * Also accepts a structured object (parity with `@adonisjs/shield`):
+	 * `csp: { directives: { 'script-src': ["'self'", '@nonce'] }, reportOnly: true }`.
+	 * `directives` are serialized to the header string; `useDefaults` (default
+	 * `true`) merges a Helmet-style hardened baseline under your directives.
 	 */
-	csp?: string | false;
+	csp?: string | CspConfig | false;
 	/**
 	 * Emit the CSP as `Content-Security-Policy-Report-Only` instead of enforcing
 	 * it (default: false). Lets a team observe violations before switching a
 	 * strict policy on — pair with a `report-to`/`report-uri` directive in `csp`.
+	 * A `csp` object's own `reportOnly` also toggles this (object wins when set).
 	 */
 	cspReportOnly?: boolean;
 	/** `Referrer-Policy` (default: `strict-origin-when-cross-origin`). */
 	referrerPolicy?: string;
 	/** `Permissions-Policy` (default: camera/mic/geolocation denied). */
 	permissionsPolicy?: string;
+}
+
+/**
+ * Structured Content-Security-Policy (parity with `@adonisjs/shield`). Prefer
+ * this over the raw string when composing a policy from parts — the `directives`
+ * map is serialized to the header value for you.
+ */
+export interface CspConfig {
+	/**
+	 * Merge the Helmet-style hardened baseline ({@link CSP_DIRECTIVE_DEFAULTS})
+	 * under your `directives` (yours win per directive). Default: `true`.
+	 */
+	useDefaults?: boolean;
+	/** Directive → source list, e.g. `{ 'script-src': ["'self'", '@nonce'] }`. */
+	directives?: Record<string, string[]>;
+	/** Emit `Content-Security-Policy-Report-Only` instead of enforcing (default: false). */
+	reportOnly?: boolean;
+}
+
+/**
+ * Helmet's default CSP directives — the hardened baseline merged under a
+ * {@link CspConfig}'s own `directives` when `useDefaults` isn't `false`.
+ */
+const CSP_DIRECTIVE_DEFAULTS: Record<string, string[]> = {
+	"default-src": ["'self'"],
+	"base-uri": ["'self'"],
+	"font-src": ["'self'", "https:", "data:"],
+	"form-action": ["'self'"],
+	"frame-ancestors": ["'self'"],
+	"img-src": ["'self'", "data:"],
+	"object-src": ["'none'"],
+	"script-src": ["'self'"],
+	"script-src-attr": ["'none'"],
+	"style-src": ["'self'", "https:", "'unsafe-inline'"],
+	"upgrade-insecure-requests": [],
+};
+
+/** Serialize a CSP directive map to a header string (`a 'self'; b; c x y`). */
+function serializeCspDirectives(directives: Record<string, string[]>): string {
+	return Object.entries(directives)
+		.map(([name, sources]) =>
+			sources.length > 0 ? `${name} ${sources.join(" ")}` : name,
+		)
+		.join("; ");
 }
 
 const SECURITY_HEADERS_DEFAULTS: SecurityHeadersConfig = {
@@ -165,11 +226,26 @@ function computeSecurityHeaders(
 		headers["strict-transport-security"] = v;
 	}
 	if (c.csp) {
-		warnUnquotedCspKeywords(c.csp);
-		const cspHeader = c.cspReportOnly
+		let cspString: string;
+		let reportOnly = c.cspReportOnly ?? false;
+		if (typeof c.csp === "string") {
+			cspString = c.csp;
+		} else {
+			// Object form: merge the hardened baseline under the caller's
+			// directives (unless useDefaults=false), then serialize to a string.
+			const merged =
+				c.csp.useDefaults === false
+					? (c.csp.directives ?? {})
+					: { ...CSP_DIRECTIVE_DEFAULTS, ...(c.csp.directives ?? {}) };
+			cspString = serializeCspDirectives(merged);
+			// The object's own reportOnly wins over the legacy top-level flag.
+			if (c.csp.reportOnly !== undefined) reportOnly = c.csp.reportOnly;
+		}
+		warnUnquotedCspKeywords(cspString);
+		const cspHeader = reportOnly
 			? "content-security-policy-report-only"
 			: "content-security-policy";
-		headers[cspHeader] = c.csp;
+		headers[cspHeader] = cspString;
 	}
 	if (c.referrerPolicy) headers["referrer-policy"] = c.referrerPolicy;
 	if (c.permissionsPolicy) headers["permissions-policy"] = c.permissionsPolicy;
@@ -244,8 +320,21 @@ function parseRequestedHeaders(value: string | undefined): string[] {
 		.filter((h) => h.length > 0);
 }
 
-const DEFAULT_CORS_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
-const DEFAULT_CORS_HEADERS = ["Content-Type", "Authorization", "Accept", "X-Requested-With"];
+const DEFAULT_CORS_METHODS = [
+	"GET",
+	"POST",
+	"PUT",
+	"PATCH",
+	"DELETE",
+	"HEAD",
+	"OPTIONS",
+];
+const DEFAULT_CORS_HEADERS = [
+	"Content-Type",
+	"Authorization",
+	"Accept",
+	"X-Requested-With",
+];
 
 /** Compute the CORS headers + flags for one request. */
 function computeCors(
@@ -281,7 +370,11 @@ function computeCors(
 		// Reject the preflight (emit NO Access-Control-Allow-* → browser blocks)
 		// when the requested method isn't allowed, matching the CORS spec /
 		// @adonisjs/cors — rather than advertising the full list regardless.
-		if (!allowedMethods.map((m) => m.toUpperCase()).includes(requestMethod.toUpperCase())) {
+		if (
+			!allowedMethods
+				.map((m) => m.toUpperCase())
+				.includes(requestMethod.toUpperCase())
+		) {
 			return { headers, varyOrigin, preflight };
 		}
 		headers["access-control-allow-methods"] = allowedMethods.join(", ");
@@ -291,11 +384,15 @@ function computeCors(
 		const requested = parseRequestedHeaders(requestHeaders);
 		if (cfg.headers === true) {
 			headers["access-control-allow-headers"] =
-				requested.length > 0 ? requested.join(", ") : DEFAULT_CORS_HEADERS.join(", ");
+				requested.length > 0
+					? requested.join(", ")
+					: DEFAULT_CORS_HEADERS.join(", ");
 		} else {
 			const allowList = cfg.headers ?? DEFAULT_CORS_HEADERS;
 			const lowered = allowList.map((h) => h.toLowerCase());
-			const disallowed = requested.find((h) => !lowered.includes(h.toLowerCase()));
+			const disallowed = requested.find(
+				(h) => !lowered.includes(h.toLowerCase()),
+			);
 			if (disallowed) return { headers, varyOrigin, preflight };
 			headers["access-control-allow-headers"] = allowList.join(", ");
 		}
@@ -349,13 +446,63 @@ export interface CsrfConfig {
 // '@c9up/blackhole/config' subpath).
 export { type BlackholeConfig, defineConfig } from "./config.js";
 
+/**
+ * Distributed counter backing rate limiting. Provide one (e.g. Redis-backed) so
+ * the limit is shared across every process/instance instead of the default
+ * in-process counter. Mirrors `@adonisjs/limiter`'s pluggable stores.
+ */
+export interface RateLimitStore {
+	/**
+	 * Atomically increment the counter for `key` and return the new count plus
+	 * the seconds until the window resets. Implementations set the TTL to
+	 * `windowSeconds` on the first hit of a window.
+	 */
+	increment(
+		key: string,
+		windowSeconds: number,
+	): Promise<{ count: number; resetSeconds: number }>;
+}
+
+/**
+ * Minimal request-context shape the rate-limit key resolver receives. Ream's
+ * `HttpContext` satisfies it structurally, so `keyFor: (ctx) => ctx.auth.user.id`
+ * type-checks in a real app without importing `@c9up/ream` here.
+ */
+export interface RateLimitContext {
+	request: { ip(): string };
+	auth?: { user?: { id?: string | number } | null };
+}
+
+/** Rate-limit decision computed against a distributed {@link RateLimitStore}. */
+export interface RateLimitDecision {
+	allowed: boolean;
+	limit: number;
+	remaining: number;
+	resetSeconds: number;
+}
+
 export interface BlackholeOptions {
 	/** Enable XSS response sanitization (default: true). */
 	xss?: boolean;
 	/** CSRF validation — `true`/`false` to toggle, or an object for fine-grained control. */
 	csrf?: boolean | CsrfConfig;
 	/** Rate limiting configuration. */
-	rateLimit?: { max: number; windowSeconds: number };
+	rateLimit?: {
+		max: number;
+		windowSeconds: number;
+		/**
+		 * Resolve the counting key for a request (parity with limiter's
+		 * `usingKey`). Defaults to the client IP. Return e.g. the authenticated
+		 * user id for per-user limits: `keyFor: (ctx) => String(ctx.auth?.user?.id ?? ctx.request.ip())`.
+		 */
+		keyFor?: (ctx: RateLimitContext) => string;
+		/**
+		 * Distributed counter. When provided, counting + the 429 decision run in
+		 * JS against this store (Redis, etc.) — the in-process Rust counter is
+		 * disabled. Omit for the single-process default.
+		 */
+		store?: RateLimitStore;
+	};
 	/** Reject requests with path-traversal sequences (`..`, `%2e%2e`) (default: true). */
 	pathTraversal?: boolean;
 	/** Reject requests with duplicate query params (HTTP parameter pollution) (default: true). */
@@ -384,6 +531,8 @@ export interface CheckResult {
 	body?: string;
 	/** Extra headers to set on a rejection (e.g. `Retry-After` / `X-RateLimit-*` on a 429). */
 	headers?: Record<string, string>;
+	/** Rate-limit numbers (when a limiter is configured) for `X-RateLimit-*` on any path. */
+	rateLimit?: RateLimitMeta;
 }
 
 export interface Blackhole {
@@ -418,6 +567,18 @@ export interface Blackhole {
 	): CorsResult | undefined;
 	/** Name + attributes of the `XSRF-TOKEN` cookie the middleware should seed. */
 	csrfCookie(): { name: string; options: Record<string, unknown> };
+	/**
+	 * Counting key for a request — the configured `rateLimit.keyFor(ctx)`, or the
+	 * client IP by default (parity with limiter's `usingKey`).
+	 */
+	rateLimitKey(ctx: RateLimitContext): string;
+	/** Is a distributed {@link RateLimitStore} configured (JS counts, Rust skips)? */
+	hasRateLimitStore(): boolean;
+	/**
+	 * Rate-limit decision via the configured store. Throws if none is configured
+	 * (guard with {@link Blackhole.hasRateLimitStore} first).
+	 */
+	checkRateLimit(key: string): Promise<RateLimitDecision>;
 }
 
 /** Cookie name shared by the Rust validator and the middleware (not configurable — Adonis fixes it). */
@@ -485,11 +646,17 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 				"`csrf: false` only if you have an alternative CSRF defense.",
 		);
 	}
+	// A distributed store moves counting + the 429 decision into JS (see
+	// `checkRateLimit`), so the in-process Rust counter must NOT also run — pass
+	// no max/window to the engine when a store is configured.
+	const rateLimit = options.rateLimit;
+	const useRustLimiter =
+		rateLimit !== undefined && rateLimit.store === undefined;
 	const filter = new native.Blackhole(
 		options.xss ?? true,
 		csrf.enabled,
-		options.rateLimit?.max,
-		options.rateLimit?.windowSeconds,
+		useRustLimiter ? rateLimit?.max : undefined,
+		useRustLimiter ? rateLimit?.windowSeconds : undefined,
 		options.pathTraversal ?? true,
 		options.paramPollution ?? true,
 		csrf.exceptRoutes,
@@ -551,11 +718,42 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 			requestHeaders?: string,
 		) {
 			return corsConfig
-				? computeCors(corsConfig, requestOrigin, method, requestMethod, requestHeaders)
+				? computeCors(
+						corsConfig,
+						requestOrigin,
+						method,
+						requestMethod,
+						requestHeaders,
+					)
 				: undefined;
 		},
 		csrfCookie() {
 			return { name: CSRF_COOKIE_NAME, options: csrf.cookieOptions };
+		},
+		rateLimitKey(ctx) {
+			return rateLimit?.keyFor?.(ctx) ?? ctx.request.ip();
+		},
+		hasRateLimitStore() {
+			return rateLimit?.store !== undefined;
+		},
+		async checkRateLimit(key) {
+			if (rateLimit?.store === undefined) {
+				throw new Error(
+					"[blackhole] checkRateLimit called without a configured rateLimit.store.",
+				);
+			}
+			const { count, resetSeconds } = await rateLimit.store.increment(
+				key,
+				rateLimit.windowSeconds,
+			);
+			// Allowed while the running count is within `max` (this request is
+			// already counted by `increment`) — matches @adonisjs/limiter.
+			return {
+				allowed: count <= rateLimit.max,
+				limit: rateLimit.max,
+				remaining: Math.max(0, rateLimit.max - count),
+				resetSeconds,
+			};
 		},
 	};
 }

@@ -4,7 +4,7 @@
 //! produce a `FilterResult::Reject` with a JSON error body.
 
 use crate::csrf::CsrfValidator;
-use crate::rate_limit::RateLimiter;
+use crate::rate_limit::{RateLimitOutcome, RateLimiter};
 use crate::{FilterResult, Request, Response};
 
 /// Configuration for the Blackhole security filter.
@@ -71,13 +71,24 @@ impl BlackholeFilter {
     }
 
     pub fn check(&self, request: Request) -> FilterResult {
+        self.check_with_meta(request).0
+    }
+
+    /// Like `check`, but also returns the rate-limit outcome (limit / remaining /
+    /// reset) when a limiter is configured — so the integration layer can emit
+    /// `X-RateLimit-*` headers on the SUCCESS path too, not just the 429
+    /// rejection (parity with @adonisjs/limiter, which sets them on every
+    /// response). `None` when no limiter is configured.
+    pub fn check_with_meta(&self, request: Request) -> (FilterResult, Option<RateLimitOutcome>) {
+        let mut rate_meta: Option<RateLimitOutcome> = None;
         if let Some(ref limiter) = self.rate_limiter {
             // Reject requests with no IP rather than sharing a global "unknown"
             // bucket — prevents unintentional DoS on all unauthenticated traffic.
             if request.remote_addr.is_empty() {
-                return FilterResult::Reject(Response::json(400, r#"{"error":{"code":"MISSING_IP","message":"Cannot rate-limit: no remote address"}}"#));
+                return (FilterResult::Reject(Response::json(400, r#"{"error":{"code":"MISSING_IP","message":"Cannot rate-limit: no remote address"}}"#)), None);
             }
             let outcome = limiter.check_detailed(&request.remote_addr);
+            rate_meta = Some(outcome);
             if !outcome.allowed {
                 // Emit backoff signals so well-behaved clients + proxies honour
                 // the limit (Retry-After + X-RateLimit-* — parity with @adonisjs/limiter).
@@ -87,25 +98,25 @@ impl BlackholeFilter {
                     ("X-RateLimit-Remaining".to_string(), "0".to_string()),
                     ("X-RateLimit-Reset".to_string(), outcome.retry_after_secs.to_string()),
                 ];
-                return FilterResult::Reject(Response::json_with_headers(
+                return (FilterResult::Reject(Response::json_with_headers(
                     429,
                     r#"{"error":{"code":"RATE_LIMITED","message":"Too many requests"}}"#,
                     headers,
-                ));
+                )), rate_meta);
             }
         }
 
         if self.config.path_traversal && crate::shield::contains_traversal(&request.path) {
-            return FilterResult::Reject(Response::json(400, r#"{"error":{"code":"E_PATH_TRAVERSAL","message":"Path traversal detected"}}"#));
+            return (FilterResult::Reject(Response::json(400, r#"{"error":{"code":"E_PATH_TRAVERSAL","message":"Path traversal detected"}}"#)), rate_meta);
         }
 
         if self.config.param_pollution {
             if let Some(dup) = crate::shield::first_duplicate_key(&request.query) {
                 let escaped = dup.replace('\\', r"\\").replace('"', r#"\""#);
-                return FilterResult::Reject(Response::json(
+                return (FilterResult::Reject(Response::json(
                     400,
                     &format!(r#"{{"error":{{"code":"E_PARAMETER_POLLUTION","message":"Duplicate parameter: {}"}}}}"#, escaped),
-                ));
+                )), rate_meta);
             }
         }
 
@@ -123,7 +134,7 @@ impl BlackholeFilter {
                     .map(|(_, v)| v.as_str())
             };
             if !v.verify_origin(find("host"), find("origin"), find("referer")) {
-                return FilterResult::Reject(Response::json(403, r#"{"error":{"code":"CSRF_ORIGIN_MISMATCH","message":"Cross-origin state-changing request rejected"}}"#));
+                return (FilterResult::Reject(Response::json(403, r#"{"error":{"code":"CSRF_ORIGIN_MISMATCH","message":"Cross-origin state-changing request rejected"}}"#)), rate_meta);
             }
 
             // Stateless double-submit: the token in the `XSRF-TOKEN` cookie must
@@ -146,11 +157,11 @@ impl BlackholeFilter {
                 .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
                 .and_then(|(_, c)| v.token_from_cookie_header(c));
             if !v.validate(cookie_token.as_deref(), submitted.as_deref()) {
-                return FilterResult::Reject(Response::json(403, r#"{"error":{"code":"CSRF_FAILED","message":"Invalid or missing CSRF token"}}"#));
+                return (FilterResult::Reject(Response::json(403, r#"{"error":{"code":"CSRF_FAILED","message":"Invalid or missing CSRF token"}}"#)), rate_meta);
             }
         }
 
-        FilterResult::Allow(request)
+        (FilterResult::Allow(request), rate_meta)
     }
 }
 

@@ -11,17 +11,42 @@
  *   })
  */
 
-import type { CorsConfig, CsrfConfig, SecurityHeadersConfig } from "./index.js";
+import type {
+	CorsConfig,
+	CsrfConfig,
+	RateLimitContext,
+	RateLimitStore,
+	SecurityHeadersConfig,
+} from "./index.js";
 
 export interface BlackholeConfig {
 	/** Enable XSS response sanitization (default: true). */
 	xss?: boolean;
 	/** CSRF validation — `true`/`false` to toggle, or an object (exceptRoutes, methods, cookie). */
 	csrf?: boolean | CsrfConfig;
-	/** Rate limiting configuration. Omit to disable. */
+	/**
+	 * Rate limiting configuration. Omit to disable.
+	 *
+	 * Without a `store`, counting uses the Rust in-process counter — **single-process
+	 * only**: each instance counts independently, so N instances allow ~N×`max`.
+	 * For horizontal scale, provide a distributed `store` (e.g. Redis-backed) so
+	 * the limit is shared across every process.
+	 */
 	rateLimit?: {
 		max: number;
 		windowSeconds: number;
+		/**
+		 * Resolve the counting key per request (parity with limiter's `usingKey`).
+		 * Defaults to the client IP. e.g. per-user:
+		 * `keyFor: (ctx) => String(ctx.auth?.user?.id ?? ctx.request.ip())`.
+		 */
+		keyFor?: (ctx: RateLimitContext) => string;
+		/**
+		 * Distributed counter for horizontal scale. When set, counting + the 429
+		 * decision run in JS against this store and the in-process Rust counter is
+		 * disabled. Omit for the single-process default.
+		 */
+		store?: RateLimitStore;
 	};
 	/** Reject path-traversal sequences in the request path (default: true). */
 	pathTraversal?: boolean;

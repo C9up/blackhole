@@ -129,6 +129,12 @@ export function blackholeFastify(options: BlackholeOptions = {}) {
 			for (const [name, value] of Object.entries(outcome.corsHeaders)) {
 				reply.header(name, value);
 			}
+			// Success-path X-RateLimit-* (parity with @adonisjs/limiter).
+			if (outcome.rateLimitHeaders) {
+				for (const [name, value] of Object.entries(outcome.rateLimitHeaders)) {
+					reply.header(name, value);
+				}
+			}
 			request.csrfToken = outcome.csrfToken;
 			if (outcome.setCookie) {
 				// Merge with any Set-Cookie already queued so we don't clobber it

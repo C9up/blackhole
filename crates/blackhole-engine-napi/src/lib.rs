@@ -44,15 +44,23 @@ impl Blackhole {
             serde_json::from_str(&headers_json)
                 .map_err(|e| Error::from_reason(format!("Invalid headers JSON: {}", e)))?;
         let req = blackhole_engine::Request { method, path, query, headers, body, remote_addr };
-        let result = catch_unwind(std::panic::AssertUnwindSafe(|| self.filter.check(req)));
+        let result = catch_unwind(std::panic::AssertUnwindSafe(|| self.filter.check_with_meta(req)));
         match result {
-            Ok(blackhole_engine::FilterResult::Allow(_)) => {
-                Ok(serde_json::json!({ "allowed": true }))
+            Ok((blackhole_engine::FilterResult::Allow(_), meta)) => {
+                let mut value = serde_json::json!({ "allowed": true });
+                if let Some(m) = meta {
+                    value["rateLimit"] = serde_json::json!({ "limit": m.limit, "remaining": m.remaining, "resetSeconds": m.retry_after_secs });
+                }
+                Ok(value)
             }
-            Ok(blackhole_engine::FilterResult::Reject(res)) => {
+            Ok((blackhole_engine::FilterResult::Reject(res), meta)) => {
                 let headers: std::collections::HashMap<String, String> =
                     res.headers.into_iter().collect();
-                Ok(serde_json::json!({ "allowed": false, "status": res.status, "body": res.body, "headers": headers }))
+                let mut value = serde_json::json!({ "allowed": false, "status": res.status, "body": res.body, "headers": headers });
+                if let Some(m) = meta {
+                    value["rateLimit"] = serde_json::json!({ "limit": m.limit, "remaining": m.remaining, "resetSeconds": m.retry_after_secs });
+                }
+                Ok(value)
             }
             Err(_) => Err(Error::from_reason("Internal panic in blackhole engine")),
         }

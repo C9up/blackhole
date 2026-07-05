@@ -46,7 +46,46 @@ export type RequestOutcome =
 				options: Record<string, unknown>;
 			};
 			cspNonce?: string;
+			/**
+			 * `X-RateLimit-*` headers to set on the SUCCESS response (parity with
+			 * `@adonisjs/limiter`, which reports the budget on every response).
+			 * Present only when the in-process limiter is active.
+			 */
+			rateLimitHeaders?: Record<string, string>;
 	  };
+
+/**
+ * Build `X-RateLimit-*` headers from a rate-limit outcome. `X-RateLimit-Reset`
+ * is emitted as an ISO-8601 timestamp (parity with `@adonisjs/limiter`), not a
+ * raw seconds count.
+ */
+export function rateLimitHeaders(
+	meta: { limit: number; remaining: number; resetSeconds: number },
+	now: number = Date.now(),
+): Record<string, string> {
+	return {
+		"X-RateLimit-Limit": String(meta.limit),
+		"X-RateLimit-Remaining": String(meta.remaining),
+		"X-RateLimit-Reset": new Date(now + meta.resetSeconds * 1000).toISOString(),
+	};
+}
+
+/**
+ * Normalise a rejection's `X-RateLimit-Reset` (the engine emits raw seconds) to
+ * an ISO-8601 timestamp so both the success and 429 paths agree (limiter parity).
+ */
+function withIsoReset(
+	headers: Record<string, string> | undefined,
+	now: number = Date.now(),
+): Record<string, string> | undefined {
+	if (!headers) return headers;
+	const reset = headers["X-RateLimit-Reset"];
+	if (reset === undefined || !/^\d+$/.test(reset)) return headers;
+	return {
+		...headers,
+		"X-RateLimit-Reset": new Date(now + Number(reset) * 1000).toISOString(),
+	};
+}
 
 /** Safe JSON parse — returns a fallback error envelope if body is not valid JSON. */
 export function safeJsonParse(body: string | undefined): unknown {
@@ -144,7 +183,7 @@ export function runRequestPhase(
 			kind: "reject",
 			status: result.status ?? 500,
 			body: safeJsonParse(result.body),
-			headers: result.headers,
+			headers: withIsoReset(result.headers),
 		};
 	}
 
@@ -159,6 +198,9 @@ export function runRequestPhase(
 		csrfToken,
 		setCookie: existing ? undefined : { name, value: csrfToken, options },
 		cspNonce,
+		rateLimitHeaders: result.rateLimit
+			? rateLimitHeaders(result.rateLimit)
+			: undefined,
 	};
 }
 

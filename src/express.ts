@@ -124,6 +124,12 @@ export function blackholeExpress(options: BlackholeOptions = {}) {
 		for (const [name, value] of Object.entries(outcome.corsHeaders)) {
 			res.setHeader(name, value);
 		}
+		// Success-path X-RateLimit-* (parity with @adonisjs/limiter).
+		if (outcome.rateLimitHeaders) {
+			for (const [name, value] of Object.entries(outcome.rateLimitHeaders)) {
+				res.setHeader(name, value);
+			}
+		}
 		req.csrfToken = outcome.csrfToken;
 		if (outcome.setCookie) {
 			// append, not setHeader — setHeader('set-cookie') replaces any cookie an

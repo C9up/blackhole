@@ -19,6 +19,7 @@ import { BLACKHOLE_KEY } from "./BlackholeProvider.js";
 import {
 	appendVaryValue,
 	type CoreRequest,
+	rateLimitHeaders,
 	runRequestPhase,
 	runResponsePhase,
 } from "./core.js";
@@ -127,6 +128,33 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 	}
 	const bh = resolved;
 
+	// Rate-limit key: the configured `keyFor(ctx)` (per-user / per-route) or the
+	// client IP by default. Used both as the distributed-store key and as the
+	// key the in-process Rust counter buckets on (passed as `remoteAddr`).
+	const rateLimitKey = bh.rateLimitKey(ctx);
+
+	// Distributed store path: count + decide in JS (Redis, etc.) so the limit is
+	// shared across instances — the Rust in-process counter is off in this mode.
+	if (bh.hasRateLimitStore()) {
+		const decision = await bh.checkRateLimit(rateLimitKey);
+		const rlHeaders = rateLimitHeaders(decision);
+		if (!decision.allowed) {
+			ctx.response.header("Retry-After", String(decision.resetSeconds));
+			for (const [name, value] of Object.entries(rlHeaders)) {
+				ctx.response.header(name, value);
+			}
+			ctx.response.status(429);
+			ctx.response.json({
+				error: { code: "RATE_LIMITED", message: "Too many requests" },
+			});
+			return;
+		}
+		// Allowed: surface the budget on the successful response below.
+		for (const [name, value] of Object.entries(rlHeaders)) {
+			ctx.response.header(name, value);
+		}
+	}
+
 	const rawBody = ctx.request.body();
 	const req: CoreRequest = {
 		method: ctx.request.method(),
@@ -134,7 +162,7 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 		url: ctx.request.url(true),
 		headers: ctx.request.headers(),
 		body: typeof rawBody === "string" ? rawBody : undefined,
-		remoteAddr: ctx.request.ip(),
+		remoteAddr: rateLimitKey,
 	};
 	const outcome = runRequestPhase(bh, req);
 
@@ -164,6 +192,13 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 	if (outcome.varyOrigin) appendVary(ctx, "Origin");
 	for (const [name, value] of Object.entries(outcome.corsHeaders)) {
 		ctx.response.header(name, value);
+	}
+	// Success-path X-RateLimit-* from the in-process limiter (store path already
+	// set them above). Parity with @adonisjs/limiter (budget on every response).
+	if (outcome.rateLimitHeaders) {
+		for (const [name, value] of Object.entries(outcome.rateLimitHeaders)) {
+			ctx.response.header(name, value);
+		}
 	}
 	ctx.request.csrfToken = outcome.csrfToken;
 	ctx.store.set("csrfToken", outcome.csrfToken);

@@ -36,7 +36,7 @@ import {
  * a misconfigured kernel) yields no resolution and the middleware throws.
  */
 interface ContainerResolver {
-	make(token: string): unknown;
+	make(token: string): Promise<unknown>;
 }
 
 /**
@@ -119,7 +119,7 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 	// (`ctx.containerResolver`, Adonis idiom) — reading from the context Ream
 	// hands us, NOT by importing `@c9up/ream/services/app`. That keeps blackhole
 	// framework-agnostic at runtime while still builds standalone.
-	const resolved = ctx.containerResolver?.make(BLACKHOLE_KEY);
+	const resolved = await ctx.containerResolver?.make(BLACKHOLE_KEY);
 	if (!isBlackhole(resolved)) {
 		throw new Error(
 			"[BLACKHOLE_NOT_REGISTERED] BlackholeProvider must register BLACKHOLE_KEY before the middleware runs, and the host must expose ctx.containerResolver.",

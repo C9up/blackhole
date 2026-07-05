@@ -76,7 +76,7 @@ function makeReamContext(opts: {
 	};
 	const ctx: ReamContext = {
 		containerResolver: {
-			make(token) {
+			async make(token) {
 				if (token === BLACKHOLE_KEY) return bh;
 				throw new Error(`No binding for ${String(token)}`);
 			},

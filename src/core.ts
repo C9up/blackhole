@@ -39,6 +39,11 @@ export type RequestOutcome =
 			corsHeaders: Record<string, string>;
 			varyOrigin: boolean;
 			csrfToken: string;
+			/**
+			 * `true` only when CSRF was enforced+validated for this request (not
+			 * merely that a token was seeded). Consumers fail-close on this.
+			 */
+			csrfProtected: boolean;
 			/** Present only when a fresh cookie must be set (none was sent). */
 			setCookie?: {
 				name: string;
@@ -196,6 +201,7 @@ export function runRequestPhase(
 		corsHeaders,
 		varyOrigin,
 		csrfToken,
+		csrfProtected: result.csrfEnforced ?? false,
 		setCookie: existing ? undefined : { name, value: csrfToken, options },
 		cspNonce,
 		rateLimitHeaders: result.rateLimit

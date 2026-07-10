@@ -79,13 +79,22 @@ impl BlackholeFilter {
     /// `X-RateLimit-*` headers on the SUCCESS path too, not just the 429
     /// rejection (parity with @adonisjs/limiter, which sets them on every
     /// response). `None` when no limiter is configured.
-    pub fn check_with_meta(&self, request: Request) -> (FilterResult, Option<RateLimitOutcome>) {
+    ///
+    /// The third tuple element, `csrf_enforced`, is `true` only when the request
+    /// reached `Allow` past the CSRF block with CSRF enabled, the method guarded,
+    /// and the route not excepted — i.e. the token was actually validated for this
+    /// request. Consumers that must fail-close on CSRF read this (a token merely
+    /// being seeded is NOT proof of verification). Always `false` on a `Reject`.
+    pub fn check_with_meta(
+        &self,
+        request: Request,
+    ) -> (FilterResult, Option<RateLimitOutcome>, bool) {
         let mut rate_meta: Option<RateLimitOutcome> = None;
         if let Some(ref limiter) = self.rate_limiter {
             // Reject requests with no IP rather than sharing a global "unknown"
             // bucket — prevents unintentional DoS on all unauthenticated traffic.
             if request.remote_addr.is_empty() {
-                return (FilterResult::Reject(Response::json(400, r#"{"error":{"code":"MISSING_IP","message":"Cannot rate-limit: no remote address"}}"#)), None);
+                return (FilterResult::Reject(Response::json(400, r#"{"error":{"code":"MISSING_IP","message":"Cannot rate-limit: no remote address"}}"#)), None, false);
             }
             let outcome = limiter.check_detailed(&request.remote_addr);
             rate_meta = Some(outcome);
@@ -102,12 +111,12 @@ impl BlackholeFilter {
                     429,
                     r#"{"error":{"code":"RATE_LIMITED","message":"Too many requests"}}"#,
                     headers,
-                )), rate_meta);
+                )), rate_meta, false);
             }
         }
 
         if self.config.path_traversal && crate::shield::contains_traversal(&request.path) {
-            return (FilterResult::Reject(Response::json(400, r#"{"error":{"code":"E_PATH_TRAVERSAL","message":"Path traversal detected"}}"#)), rate_meta);
+            return (FilterResult::Reject(Response::json(400, r#"{"error":{"code":"E_PATH_TRAVERSAL","message":"Path traversal detected"}}"#)), rate_meta, false);
         }
 
         if self.config.param_pollution {
@@ -116,7 +125,7 @@ impl BlackholeFilter {
                 return (FilterResult::Reject(Response::json(
                     400,
                     &format!(r#"{{"error":{{"code":"E_PARAMETER_POLLUTION","message":"Duplicate parameter: {}"}}}}"#, escaped),
-                )), rate_meta);
+                )), rate_meta, false);
             }
         }
 
@@ -134,7 +143,7 @@ impl BlackholeFilter {
                     .map(|(_, v)| v.as_str())
             };
             if !v.verify_origin(find("host"), find("origin"), find("referer")) {
-                return (FilterResult::Reject(Response::json(403, r#"{"error":{"code":"CSRF_ORIGIN_MISMATCH","message":"Cross-origin state-changing request rejected"}}"#)), rate_meta);
+                return (FilterResult::Reject(Response::json(403, r#"{"error":{"code":"CSRF_ORIGIN_MISMATCH","message":"Cross-origin state-changing request rejected"}}"#)), rate_meta, false);
             }
 
             // Stateless double-submit: the token in the `XSRF-TOKEN` cookie must
@@ -157,11 +166,18 @@ impl BlackholeFilter {
                 .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
                 .and_then(|(_, c)| v.token_from_cookie_header(c));
             if !v.validate(cookie_token.as_deref(), submitted.as_deref()) {
-                return (FilterResult::Reject(Response::json(403, r#"{"error":{"code":"CSRF_FAILED","message":"Invalid or missing CSRF token"}}"#)), rate_meta);
+                return (FilterResult::Reject(Response::json(403, r#"{"error":{"code":"CSRF_FAILED","message":"Invalid or missing CSRF token"}}"#)), rate_meta, false);
             }
         }
 
-        (FilterResult::Allow(request), rate_meta)
+        // Reaching here past the CSRF block means the token was validated iff the
+        // block's guard was true — recompute that exact predicate (it borrows
+        // `request` before the move into `Allow`). `v` (`&self.csrf_validator`)
+        // stays the single matcher for method-guarding + `exceptRoutes`.
+        let csrf_enforced = self.config.csrf_enabled
+            && v.requires_csrf(&request.method)
+            && !v.is_excepted(&request.path);
+        (FilterResult::Allow(request), rate_meta, csrf_enforced)
     }
 }
 

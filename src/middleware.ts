@@ -66,6 +66,12 @@ export interface ReamContext {
 		ip(): string;
 		/** CSRF token for this request (Adonis idiom: `request.csrfToken`). Seeded by the middleware. */
 		csrfToken?: string;
+		/**
+		 * `true` only when CSRF was enforced+validated for this request. Consumers
+		 * that must fail-close on CSRF (e.g. an admin write route) read this — a
+		 * seeded `csrfToken` is NOT proof of verification.
+		 */
+		csrfProtected?: boolean;
 	};
 	/** Per-request store — the CSRF token is published here for templating (inker `csrfField()`). */
 	store: { set(key: string, value: unknown): void };
@@ -202,6 +208,10 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 	}
 	ctx.request.csrfToken = outcome.csrfToken;
 	ctx.store.set("csrfToken", outcome.csrfToken);
+	// The enforce signal (fail-close), distinct from the seeded token above: `true`
+	// only when CSRF was enabled, guarded, non-excepted, AND validated. NOT mirrored
+	// to `ctx.store` — the store's token is for the ALS-based inker `csrfField()`.
+	ctx.request.csrfProtected = outcome.csrfProtected;
 	if (outcome.setCookie) {
 		// plainCookie: the XSRF token is already HMAC-signed by blackhole; the
 		// browser must read the raw value for the double-submit check, so it must

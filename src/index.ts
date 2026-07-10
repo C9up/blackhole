@@ -49,6 +49,8 @@ interface NativeBlackhole {
 		body?: string;
 		headers?: Record<string, string>;
 		rateLimit?: RateLimitMeta;
+		/** Was CSRF actually enforced+validated for this request (vs merely seeded)? */
+		csrfEnforced?: boolean;
 	};
 	sanitizeResponse(body: string, contentType: string): string;
 }
@@ -533,6 +535,12 @@ export interface CheckResult {
 	headers?: Record<string, string>;
 	/** Rate-limit numbers (when a limiter is configured) for `X-RateLimit-*` on any path. */
 	rateLimit?: RateLimitMeta;
+	/**
+	 * `true` only when CSRF was enabled, the method guarded, the route not
+	 * excepted, AND the token validated for this request. A seeded token is NOT
+	 * proof — consumers that must fail-close on CSRF read this, not the token.
+	 */
+	csrfEnforced?: boolean;
 }
 
 export interface Blackhole {

@@ -37,7 +37,7 @@ jobs:
         with:
           node-version: '22'
       - run: pnpm install --no-frozen-lockfile
-      - run: pnpm typecheck
+      - run: pnpm exec tsc -p tsconfig.build.json --noEmit
       - run: pnpm lint
   build-and-test:
     name: Build & test (${{ matrix.suffix }})

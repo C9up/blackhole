@@ -14,11 +14,16 @@
 import {
 	appendVaryValue,
 	type CoreRequest,
+	rateLimitHeaders,
 	runRequestPhase,
 	runResponsePhase,
 	serializeCookie,
 } from "./core.js";
-import { type BlackholeOptions, createBlackhole } from "./index.js";
+import {
+	type BlackholeOptions,
+	createBlackhole,
+	type RateLimitContext,
+} from "./index.js";
 
 /** Structural subset of a Fastify request the adapter reads. */
 interface FastifyRequest {
@@ -97,6 +102,33 @@ export function blackholeFastify(options: BlackholeOptions = {}) {
 		// `_csrf` form-field token is available to CSRF validation. onRequest fires
 		// before body parsing → request.body undefined → form CSRF was dead.
 		fastify.addHook("preValidation", async (request, reply) => {
+			const remoteAddr = request.ip ?? "";
+
+			// Rate-limit key: the configured `keyFor` (per-user/route), else the
+			// client IP. In distributed-store mode the count + 429 decision run in
+			// JS here (the Rust in-process counter is off) — mirrors the Ream
+			// middleware. Without this, a standalone app configuring
+			// `rateLimit.store` would get NO limiting (Rust off AND store unused).
+			const rlCtx: RateLimitContext = { request: { ip: () => remoteAddr } };
+			const rateLimitKey = bh.rateLimitKey(rlCtx);
+			if (bh.hasRateLimitStore()) {
+				const decision = await bh.checkRateLimit(rateLimitKey);
+				const rlHeaders = rateLimitHeaders(decision);
+				if (!decision.allowed) {
+					reply.header("Retry-After", String(decision.resetSeconds));
+					for (const [name, value] of Object.entries(rlHeaders)) {
+						reply.header(name, value);
+					}
+					await reply.code(429).send({
+						error: { code: "RATE_LIMITED", message: "Too many requests" },
+					});
+					return;
+				}
+				for (const [name, value] of Object.entries(rlHeaders)) {
+					reply.header(name, value);
+				}
+			}
+
 			const coreReq: CoreRequest = {
 				method: request.method,
 				path:
@@ -105,7 +137,7 @@ export function blackholeFastify(options: BlackholeOptions = {}) {
 				url: request.url,
 				headers: flattenHeaders(request.headers),
 				body: bodyString(request.body),
-				remoteAddr: request.ip ?? "",
+				remoteAddr: rateLimitKey,
 			};
 			const outcome = runRequestPhase(bh, coreReq);
 

@@ -24,7 +24,15 @@ router.use([() => import('@c9up/blackhole/middleware')])
 
 ```ts
 import { blackholeExpress } from '@c9up/blackhole/express'
-app.use(blackholeExpress({ csrf: true, rateLimit: { max: 100, windowSeconds: 60 } }))
+
+// `secret` is REQUIRED when CSRF is on (signed double-submit, fail-closed).
+// The Ream provider defaults it from APP_KEY; the standalone adapters do not,
+// so pass your app key explicitly here.
+app.use(blackholeExpress({
+  secret: process.env.APP_KEY,
+  csrf: true,
+  rateLimit: { max: 100, windowSeconds: 60 },
+}))
 ```
 
 ## Entry points

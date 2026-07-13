@@ -336,3 +336,73 @@ describe("blackhole > audit 2026-06-13 fixes", () => {
 		expect(cookies.some((c) => c.startsWith("XSRF-TOKEN="))).toBe(true); // ours added
 	});
 });
+
+describe("blackhole > adapters honour rateLimit.store (distributed limiting)", () => {
+	function denyingStore(calls: string[]) {
+		return {
+			async increment(key: string) {
+				calls.push(key);
+				return { count: 999, resetSeconds: 30 }; // over any max → denied
+			},
+		};
+	}
+
+	it("Express: consults the JS store and 429s when it denies (was silently disabled)", async () => {
+		const calls: string[] = [];
+		const mw = blackholeExpress({
+			csrf: false,
+			rateLimit: { max: 5, windowSeconds: 60, store: denyingStore(calls) },
+		});
+		const { req, res, spy } = mockExpress({ method: "GET" });
+		let nextCalled = false;
+		await mw(req, res, () => {
+			nextCalled = true;
+		});
+		expect(calls).toEqual(["1.2.3.4"]); // keyed on the client IP
+		expect(spy.status).toBe(429);
+		expect(nextCalled).toBe(false);
+		expect(res.getHeader("retry-after")).toBe("30");
+	});
+
+	it("Express: passes when the store allows within budget", async () => {
+		const mw = blackholeExpress({
+			csrf: false,
+			rateLimit: {
+				max: 5,
+				windowSeconds: 60,
+				store: {
+					async increment() {
+						return { count: 1, resetSeconds: 30 };
+					},
+				},
+			},
+		});
+		const { req, res, spy } = mockExpress({ method: "GET" });
+		let nextCalled = false;
+		await mw(req, res, () => {
+			nextCalled = true;
+		});
+		expect(nextCalled).toBe(true);
+		expect(spy.status).toBeUndefined();
+	});
+
+	it("Fastify: consults the JS store and 429s when it denies", async () => {
+		const calls: string[] = [];
+		const { preValidation } = await registerFastify(
+			blackholeFastify({
+				csrf: false,
+				rateLimit: { max: 5, windowSeconds: 60, store: denyingStore(calls) },
+			}),
+		);
+		const { reply, spy } = mockReply();
+		const request: FastifyReqLike = {
+			method: "GET",
+			url: "/",
+			headers: {},
+			ip: "9.9.9.9",
+		};
+		await preValidation?.(request, reply, undefined);
+		expect(calls).toEqual(["9.9.9.9"]);
+		expect(spy.code).toBe(429);
+	});
+});

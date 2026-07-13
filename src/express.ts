@@ -13,11 +13,16 @@
 import {
 	appendVaryValue,
 	type CoreRequest,
+	rateLimitHeaders,
 	runRequestPhase,
 	runResponsePhase,
 	serializeCookie,
 } from "./core.js";
-import { type BlackholeOptions, createBlackhole } from "./index.js";
+import {
+	type BlackholeOptions,
+	createBlackhole,
+	type RateLimitContext,
+} from "./index.js";
 
 /** Structural subset of an Express request the adapter reads. */
 interface ExpressRequest {
@@ -87,19 +92,46 @@ function appendVary(res: ExpressResponse, value: string): void {
 export function blackholeExpress(options: BlackholeOptions = {}) {
 	const bh = createBlackhole(options);
 
-	return (
+	return async (
 		req: ExpressRequest,
 		res: ExpressResponse,
 		next: ExpressNext,
-	): void => {
+	): Promise<void> => {
 		const headers = flattenHeaders(req.headers);
+		const remoteAddr = req.ip ?? req.socket?.remoteAddress ?? "";
+
+		// Rate-limit key: the configured `keyFor` (per-user/route), else the client
+		// IP. In distributed-store mode the count + 429 decision run in JS here (the
+		// Rust in-process counter is off) — mirrors the Ream middleware. Without
+		// this, a standalone app configuring `rateLimit.store` would get NO limiting
+		// at all (the Rust limiter is disabled AND the store was never consulted).
+		const rlCtx: RateLimitContext = { request: { ip: () => remoteAddr } };
+		const rateLimitKey = bh.rateLimitKey(rlCtx);
+		if (bh.hasRateLimitStore()) {
+			const decision = await bh.checkRateLimit(rateLimitKey);
+			const rlHeaders = rateLimitHeaders(decision);
+			if (!decision.allowed) {
+				res.setHeader("Retry-After", String(decision.resetSeconds));
+				for (const [name, value] of Object.entries(rlHeaders)) {
+					res.setHeader(name, value);
+				}
+				res.status(429).json({
+					error: { code: "RATE_LIMITED", message: "Too many requests" },
+				});
+				return;
+			}
+			for (const [name, value] of Object.entries(rlHeaders)) {
+				res.setHeader(name, value);
+			}
+		}
+
 		const coreReq: CoreRequest = {
 			method: req.method,
 			path: req.path ?? new URL(req.url, "http://localhost").pathname,
 			url: req.originalUrl ?? req.url,
 			headers,
 			body: bodyString(req.body),
-			remoteAddr: req.ip ?? req.socket?.remoteAddress ?? "",
+			remoteAddr: rateLimitKey,
 		};
 		const outcome = runRequestPhase(bh, coreReq);
 

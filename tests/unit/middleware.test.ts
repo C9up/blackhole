@@ -4,7 +4,9 @@ import BlackholeProvider, {
 	type BlackholeAppContext,
 } from "../../src/BlackholeProvider.js";
 import { createBlackhole } from "../../src/index.js";
+
 const SECRET = "test-app-key-32-bytes-long-aaaaaa";
+
 import BlackholeMiddleware, {
 	blackholeMiddleware,
 	type ReamContext,

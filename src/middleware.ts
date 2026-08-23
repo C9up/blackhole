@@ -219,12 +219,23 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 		ctx.response.plainCookie(
 			outcome.setCookie.name,
 			outcome.setCookie.value,
-			outcome.setCookie.options,
+			// `encode: false`: the browser reads this cookie and echoes it in a
+			// header for the double-submit check, so both sides must see the SAME
+			// bytes. A packed envelope would be echoed packed and never match.
+			{ ...outcome.setCookie.options, encode: false },
 		);
 	}
 	if (outcome.cspNonce) {
 		ctx.response.nonce = outcome.cspNonce;
 		ctx.store.set("cspNonce", outcome.cspNonce);
+		// Share it with the request's view, as AdonisJS's shield does, so a
+		// migrated template writes `<script nonce="{{ cspNonce }}">` — a VALUE,
+		// not a call. A no-op when the app has no template layer.
+		const view = Reflect.get(Object(ctx), "view");
+		const share = Reflect.get(Object(view), "share");
+		if (typeof share === "function") {
+			share.call(view, { cspNonce: outcome.cspNonce });
+		}
 	}
 
 	await next();

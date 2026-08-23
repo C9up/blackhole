@@ -427,8 +427,16 @@ export interface CsrfCookieConfig {
 export interface CsrfConfig {
 	/** Enable CSRF validation (default: true). */
 	enabled?: boolean;
-	/** Route patterns to skip (exact, or trailing-`*` prefix), e.g. `/api/webhooks/*`. */
-	exceptRoutes?: string[];
+	/**
+	 * Routes to skip: patterns (exact, or trailing-`*` prefix) or a predicate.
+	 *
+	 * AdonisJS accepts both. The ARRAY form is evaluated in Rust with the rest
+	 * of the check; a PREDICATE runs in JS before it, since a function cannot
+	 * cross the NAPI boundary.
+	 */
+	exceptRoutes?:
+		| string[]
+		| ((req: { method: string; path: string }) => boolean);
 	/** HTTP methods to guard (default: POST, PUT, PATCH, DELETE). */
 	methods?: string[];
 	/**
@@ -439,8 +447,17 @@ export interface CsrfConfig {
 	 * need nothing here. e.g. `['https://admin.example.com']`.
 	 */
 	trustedOrigins?: string[];
+	/**
+	 * Seed the readable `XSRF-TOKEN` cookie (AdonisJS `enableXsrfCookie`).
+	 *
+	 * Default true. An all-SSR app that only ever sends the `_csrf` form field
+	 * has no use for it, and not setting a cookie is one less thing to leak.
+	 */
+	enableXsrfCookie?: boolean;
 	/** Attributes for the seeded `XSRF-TOKEN` cookie. */
 	cookie?: CsrfCookieConfig;
+	/** AdonisJS spelling of {@link cookie}. Both are accepted. */
+	cookieOptions?: CsrfCookieConfig;
 }
 
 // Re-export the config helper so the documented `import { defineConfig } from
@@ -575,6 +592,10 @@ export interface Blackhole {
 	): CorsResult | undefined;
 	/** Name + attributes of the `XSRF-TOKEN` cookie the middleware should seed. */
 	csrfCookie(): { name: string; options: Record<string, unknown> };
+	/** Whether the readable `XSRF-TOKEN` cookie should be seeded at all. */
+	xsrfCookieEnabled(): boolean;
+	/** Whether a JS-side `exceptRoutes` predicate exempts this request. */
+	csrfExempt(req: { method: string; path: string }): boolean;
 	/**
 	 * Counting key for a request — the configured `rateLimit.keyFor(ctx)`, or the
 	 * client IP by default (parity with limiter's `usingKey`).
@@ -596,13 +617,16 @@ const CSRF_COOKIE_NAME = "XSRF-TOKEN";
 function resolveCsrf(csrf: boolean | CsrfConfig | undefined): {
 	enabled: boolean;
 	exceptRoutes: string[];
+	exceptPredicate?: (req: { method: string; path: string }) => boolean;
 	methods: string[];
 	trustedOrigins: string[];
+	enableXsrfCookie: boolean;
 	cookieOptions: Record<string, unknown>;
 } {
 	const cfg: CsrfConfig =
 		typeof csrf === "boolean" ? { enabled: csrf } : (csrf ?? {});
-	const cookie = cfg.cookie ?? {};
+	// `cookieOptions` (AdonisJS) and `cookie` (blackhole) name the same thing.
+	const cookie = cfg.cookieOptions ?? cfg.cookie ?? {};
 	// The XSRF-TOKEN cookie MUST stay readable by JS for the double-submit flow
 	// (the SPA reads it and echoes X-XSRF-TOKEN). Setting httpOnly breaks that —
 	// every non-form POST would 403. Allow it (all-SSR apps use the _csrf field)
@@ -614,11 +638,14 @@ function resolveCsrf(csrf: boolean | CsrfConfig | undefined): {
 				"Only set this when every client is server-rendered (token via the _csrf field).\n",
 		);
 	}
+	const except = cfg.exceptRoutes;
 	return {
 		enabled: cfg.enabled ?? true,
-		exceptRoutes: cfg.exceptRoutes ?? [],
+		exceptRoutes: Array.isArray(except) ? except : [],
+		exceptPredicate: typeof except === "function" ? except : undefined,
 		methods: cfg.methods ?? [],
 		trustedOrigins: cfg.trustedOrigins ?? [],
+		enableXsrfCookie: cfg.enableXsrfCookie ?? true,
 		cookieOptions: {
 			path: cookie.path ?? "/",
 			sameSite: cookie.sameSite ?? "lax",
@@ -734,6 +761,14 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 						requestHeaders,
 					)
 				: undefined;
+		},
+		xsrfCookieEnabled() {
+			return csrf.enableXsrfCookie;
+		},
+		csrfExempt(req) {
+			// The array form is handled inside the Rust check; only the predicate
+			// has to be asked here.
+			return csrf.exceptPredicate?.(req) ?? false;
 		},
 		csrfCookie() {
 			return { name: CSRF_COOKIE_NAME, options: csrf.cookieOptions };

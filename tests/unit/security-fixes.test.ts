@@ -19,14 +19,19 @@ describe("CSP hardening + Report-Only", () => {
 			securityHeaders: { csp: "script-src @nonce", cspReportOnly: true },
 		});
 		const h = bh.securityHeaders("abc123");
-		expect(h["content-security-policy-report-only"]).toBe("script-src 'nonce-abc123'");
+		expect(h["content-security-policy-report-only"]).toBe(
+			"script-src 'nonce-abc123'",
+		);
 	});
 });
 
 describe("HSTS maxAge validation", () => {
 	it("throws on a negative maxAge (would silently disable HSTS)", () => {
 		expect(() =>
-			createBlackhole({ secret: SECRET, securityHeaders: { hsts: { maxAge: -1 } } }),
+			createBlackhole({
+				secret: SECRET,
+				securityHeaders: { hsts: { maxAge: -1 } },
+			}),
 		).toThrow(/HSTS maxAge/);
 	});
 });
@@ -43,10 +48,14 @@ describe("CORS request validation", () => {
 			secret: SECRET,
 			cors: { origin: "https://a.test,https://b.test" },
 		});
-		expect(b.cors("https://b.test", "GET")?.headers["access-control-allow-origin"]).toBe(
-			"https://b.test",
-		);
-		expect(b.cors("https://evil.test", "GET")?.headers["access-control-allow-origin"]).toBeUndefined();
+		expect(
+			b.cors("https://b.test", "GET")?.headers["access-control-allow-origin"],
+		).toBe("https://b.test");
+		expect(
+			b.cors("https://evil.test", "GET")?.headers[
+				"access-control-allow-origin"
+			],
+		).toBeUndefined();
 	});
 
 	it("refuses a preflight whose requested method isn't allowed", () => {
@@ -62,20 +71,41 @@ describe("CORS request validation", () => {
 	});
 
 	it("refuses a preflight requesting a header outside the allow-list", () => {
-		const res = bh(["Content-Type"]).cors("https://app.test", "OPTIONS", "POST", "X-Evil");
+		const res = bh(["Content-Type"]).cors(
+			"https://app.test",
+			"OPTIONS",
+			"POST",
+			"X-Evil",
+		);
 		expect(res?.headers["access-control-allow-headers"]).toBeUndefined();
 	});
 
 	it("reflects requested headers when headers: true", () => {
-		const res = bh(true).cors("https://app.test", "OPTIONS", "POST", "X-Custom, X-Trace");
-		expect(res?.headers["access-control-allow-headers"]).toBe("X-Custom, X-Trace");
+		const res = bh(true).cors(
+			"https://app.test",
+			"OPTIONS",
+			"POST",
+			"X-Custom, X-Trace",
+		);
+		expect(res?.headers["access-control-allow-headers"]).toBe(
+			"X-Custom, X-Trace",
+		);
 	});
 });
 
 describe("rate-limit backoff headers (native)", () => {
 	it("emits Retry-After + X-RateLimit-* on a 429", () => {
-		const bh = createBlackhole({ secret: SECRET, csrf: false, rateLimit: { max: 1, windowSeconds: 60 } });
-		const req = { method: "GET", path: "/", headers: {}, remoteAddr: "9.9.9.9" };
+		const bh = createBlackhole({
+			secret: SECRET,
+			csrf: false,
+			rateLimit: { max: 1, windowSeconds: 60 },
+		});
+		const req = {
+			method: "GET",
+			path: "/",
+			headers: {},
+			remoteAddr: "9.9.9.9",
+		};
 		expect(bh.check(req).allowed).toBe(true);
 		const blocked = bh.check(req);
 		expect(blocked.allowed).toBe(false);
@@ -97,7 +127,12 @@ describe("CSRF Origin/Referer defense-in-depth (native)", () => {
 			host: "app.test",
 		};
 		if (origin) headers.origin = origin;
-		return bh.check({ method: "POST", path: "/", headers, remoteAddr: "127.0.0.1" });
+		return bh.check({
+			method: "POST",
+			path: "/",
+			headers,
+			remoteAddr: "127.0.0.1",
+		});
 	}
 
 	it("allows a same-origin POST with a valid token", () => {

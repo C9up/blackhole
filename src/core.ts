@@ -175,6 +175,22 @@ export function runRequestPhase(
 		return { kind: "preflight", status: 204, headers: corsHeaders, varyOrigin };
 	}
 
+	// A predicate `exceptRoutes` runs before the engine: a function cannot cross
+	// the NAPI boundary, so the exemption is decided here.
+	if (bh.csrfExempt({ method: req.method, path: req.path })) {
+		const { name, options } = bh.csrfCookie();
+		const existing = readCookie(req.headers.cookie ?? "", name);
+		return {
+			kind: "pass",
+			corsHeaders,
+			varyOrigin,
+			csrfToken: existing ?? bh.generateCsrfToken(),
+			csrfProtected: false,
+			setCookie: undefined,
+			cspNonce: bh.cspHasNonce() ? bh.generateNonce() : undefined,
+		};
+	}
+
 	const result = bh.check({
 		method: req.method,
 		path: req.path,
@@ -202,7 +218,12 @@ export function runRequestPhase(
 		varyOrigin,
 		csrfToken,
 		csrfProtected: result.csrfEnforced ?? false,
-		setCookie: existing ? undefined : { name, value: csrfToken, options },
+		// Not seeded when the app turned the readable cookie off: an all-SSR app
+		// sends the token in the `_csrf` field and has no use for it.
+		setCookie:
+			existing || !bh.xsrfCookieEnabled()
+				? undefined
+				: { name, value: csrfToken, options },
 		cspNonce,
 		rateLimitHeaders: result.rateLimit
 			? rateLimitHeaders(result.rateLimit)

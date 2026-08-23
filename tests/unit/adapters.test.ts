@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { blackholeExpress } from "../../src/express.js";
 import { blackholeFastify } from "../../src/fastify.js";
 import { createBlackhole } from "../../src/index.js";
+
 const SECRET = "test-app-key-32-bytes-long-aaaaaa";
 
 // ── Express adapter ──────────────────────────────────────────

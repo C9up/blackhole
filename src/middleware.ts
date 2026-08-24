@@ -177,6 +177,7 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 		for (const [name, value] of Object.entries(outcome.headers ?? {})) {
 			ctx.response.header(name, value);
 		}
+		if (handleCsrfRejectionForBrowser(ctx, outcome.body)) return;
 		// Two-step: `.status(...).json(...)` chaining relies on a self-typed
 		// return the structural interface can't express. Splitting is equivalent.
 		ctx.response.status(outcome.status);
@@ -265,3 +266,76 @@ export default class BlackholeMiddleware {
 }
 
 export { type Blackhole, type BlackholeOptions, createBlackhole };
+
+/** The keys Adonis keeps out of the re-flashed form on a CSRF failure. */
+const CSRF_FLASH_EXCEPT = [
+	"_csrf",
+	"_method",
+	"password",
+	"password_confirmation",
+];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function isBadCsrfBody(body: unknown): boolean {
+	if (!isRecord(body)) return false;
+	const error = body.error;
+	return isRecord(error) && error.code === "E_BAD_CSRF_TOKEN";
+}
+
+/**
+ * Turn a CSRF rejection into what `@adonisjs/shield` does for a browser: flash
+ * the submitted form back (minus the token, the method override and any
+ * password), flash the message, and redirect to the previous page.
+ *
+ * A JSON client still gets the JSON body — Shield's own handler only takes the
+ * redirect path for a session-backed request.
+ *
+ * Returns whether it handled the response. Everything it needs is duck-typed:
+ * blackhole does not depend on a session or a redirect builder existing, and a
+ * host that has neither falls through to the JSON reply.
+ */
+function handleCsrfRejectionForBrowser(
+	ctx: ReamContext,
+	body: unknown,
+): boolean {
+	if (!isBadCsrfBody(body)) return false;
+
+	const accept = ctx.request.header("accept") ?? "";
+	// An explicit JSON request, an XHR, or a client that never asked for HTML
+	// gets the JSON body — redirecting those would swallow the failure.
+	if (!accept.includes("text/html")) return false;
+
+	const session = Reflect.get(Object(ctx), "session");
+	const redirect = Reflect.get(Object(ctx.response), "redirect");
+	if (!isRecord(session) || typeof redirect !== "function") return false;
+
+	const message =
+		(isRecord(body) &&
+		isRecord(body.error) &&
+		typeof body.error.message === "string"
+			? body.error.message
+			: undefined) ?? "Invalid or expired CSRF token";
+
+	callIfFunction(session, "flashExcept", CSRF_FLASH_EXCEPT);
+	callIfFunction(session, "flash", "error", message);
+	callIfFunction(session, "flashErrors", { E_BAD_CSRF_TOKEN: message });
+
+	const builder = Reflect.apply(redirect, ctx.response, []);
+	const back = isRecord(builder) ? builder.back : undefined;
+	if (typeof back !== "function") return false;
+	Reflect.apply(back, builder, []);
+	return true;
+}
+
+/** Call `name` on `target` when it is there — the host may implement only some. */
+function callIfFunction(
+	target: Record<string, unknown>,
+	name: string,
+	...args: unknown[]
+): void {
+	const fn = target[name];
+	if (typeof fn === "function") Reflect.apply(fn, target, args);
+}

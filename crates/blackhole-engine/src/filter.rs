@@ -166,7 +166,12 @@ impl BlackholeFilter {
                 .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
                 .and_then(|(_, c)| v.token_from_cookie_header(c));
             if !v.validate(cookie_token.as_deref(), submitted.as_deref()) {
-                return (FilterResult::Reject(Response::json(403, r#"{"error":{"code":"CSRF_FAILED","message":"Invalid or missing CSRF token"}}"#)), rate_meta, false);
+                // `E_BAD_CSRF_TOKEN` with this exact message is what
+                // `@adonisjs/shield` raises. `middleware.ts` keys off that code
+                // to turn a browser request into a flash + redirect back, the
+                // way Shield's own handler does. Shield does NOT distinguish a
+                // missing token from a mismatched one; neither do we.
+                return (FilterResult::Reject(Response::json(403, r#"{"error":{"code":"E_BAD_CSRF_TOKEN","message":"Invalid or expired CSRF token"}}"#)), rate_meta, false);
             }
         }
 

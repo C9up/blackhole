@@ -1,7 +1,7 @@
 {
   "name": "@c9up/blackhole",
-  "version": "0.1.11",
-  "description": "Blackhole — Rust-native security filter (XSS, CSRF, rate-limiting) for any Node.js framework",
+  "version": "0.1.12",
+  "description": "Blackhole \u2014 Rust-native security filter (XSS, CSRF, rate-limiting) for any Node.js framework",
   "license": "MIT",
   "type": "module",
   "main": "./src/index.ts",

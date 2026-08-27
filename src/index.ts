@@ -143,9 +143,42 @@ export interface CspConfig {
 	 */
 	useDefaults?: boolean;
 	/** Directive → source list, e.g. `{ 'script-src': ["'self'", '@nonce'] }`. */
-	directives?: Record<string, string[]>;
+	directives?: Record<
+		string,
+		string[] | null | typeof dangerouslyDisableDefaultSrc
+	>;
 	/** Emit `Content-Security-Policy-Report-Only` instead of enforcing (default: false). */
 	reportOnly?: boolean;
+}
+
+/**
+ * Remove a directive that the hardened baseline supplies.
+ *
+ * Put it as a directive's VALUE. Setting `default-src` to an empty array would
+ * emit a bare `default-src`, which forbids everything; omitting the key leaves
+ * the baseline's value in place. Neither is "drop this directive", which is
+ * what a CSP built entirely from explicit sources needs — hence the marker.
+ *
+ * `dangerously` is upstream's word and it is earned: dropping `default-src`
+ * removes the fallback every un-set fetch directive relies on.
+ */
+export const dangerouslyDisableDefaultSrc = Symbol.for(
+	"blackhole.csp.dangerouslyDisableDefaultSrc",
+);
+
+/**
+ * The hardened baseline, as a fresh object.
+ *
+ * Exposed so an app can EXTEND a directive rather than replace it —
+ * `[...getDefaultDirectives()['script-src'], 'https://cdn.example']` keeps the
+ * baseline's sources instead of silently dropping them, which is what writing
+ * the directive out by hand does. A copy is returned: mutating the result must
+ * not change what the next request gets.
+ */
+export function getDefaultDirectives(): Record<string, string[]> {
+	return Object.fromEntries(
+		Object.entries(CSP_DIRECTIVE_DEFAULTS).map(([k, v]) => [k, [...v]]),
+	);
 }
 
 /**
@@ -165,6 +198,27 @@ const CSP_DIRECTIVE_DEFAULTS: Record<string, string[]> = {
 	"style-src": ["'self'", "https:", "'unsafe-inline'"],
 	"upgrade-insecure-requests": [],
 };
+
+/**
+ * Drop the directives marked for removal, leaving a plain source map.
+ *
+ * `null` and {@link dangerouslyDisableDefaultSrc} both mean "this directive
+ * must not be emitted" — the second only reads better at the call site for the
+ * one directive whose absence actually matters.
+ */
+function dropMarkedDirectives(
+	directives: Record<
+		string,
+		string[] | null | typeof dangerouslyDisableDefaultSrc
+	>,
+): Record<string, string[]> {
+	const out: Record<string, string[]> = {};
+	for (const [name, sources] of Object.entries(directives)) {
+		if (sources === null || sources === dangerouslyDisableDefaultSrc) continue;
+		out[name] = sources;
+	}
+	return out;
+}
 
 /** Serialize a CSP directive map to a header string (`a 'self'; b; c x y`). */
 function serializeCspDirectives(directives: Record<string, string[]>): string {
@@ -237,9 +291,9 @@ function computeSecurityHeaders(
 			// directives (unless useDefaults=false), then serialize to a string.
 			const merged =
 				c.csp.useDefaults === false
-					? (c.csp.directives ?? {})
+					? { ...(c.csp.directives ?? {}) }
 					: { ...CSP_DIRECTIVE_DEFAULTS, ...(c.csp.directives ?? {}) };
-			cspString = serializeCspDirectives(merged);
+			cspString = serializeCspDirectives(dropMarkedDirectives(merged));
 			// The object's own reportOnly wins over the legacy top-level flag.
 			if (c.csp.reportOnly !== undefined) reportOnly = c.csp.reportOnly;
 		}

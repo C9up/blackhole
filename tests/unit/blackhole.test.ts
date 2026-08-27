@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createBlackhole, defineConfig } from "../../src/index.js";
+import {
+	createBlackhole,
+	dangerouslyDisableDefaultSrc,
+	defineConfig,
+	getDefaultDirectives,
+} from "../../src/index.js";
 
 /** Signed double-submit needs a secret whenever CSRF is enabled. */
 const SECRET = "test-app-key-32-bytes-long-aaaaaa";
@@ -224,5 +229,74 @@ describe("blackhole", () => {
 				secret: SECRET,
 			}),
 		).toThrow();
+	});
+});
+
+describe("CSP directive defaults and removal", () => {
+	it("exposes the hardened baseline so a directive can be EXTENDED, not replaced", () => {
+		const defaults = getDefaultDirectives();
+
+		// The point: writing `script-src` out by hand silently drops the
+		// baseline's sources. Extending keeps them.
+		expect(defaults["script-src"]).toEqual(["'self'"]);
+		expect(defaults["object-src"]).toEqual(["'none'"]);
+
+		const bh = createBlackhole(
+			defineConfig({
+				// CSP only here; blackhole fails closed without a CSRF secret.
+				csrf: false,
+				securityHeaders: {
+					csp: {
+						directives: {
+							"script-src": [...defaults["script-src"], "https://cdn.example"],
+						},
+					},
+				},
+			}),
+		);
+		const csp = bh.securityHeaders()["content-security-policy"] as string;
+		expect(csp).toContain("script-src 'self' https://cdn.example");
+	});
+
+	it("hands back a copy, so mutating it cannot poison the next request", () => {
+		const first = getDefaultDirectives();
+		first["script-src"].push("https://evil.example");
+		expect(getDefaultDirectives()["script-src"]).toEqual(["'self'"]);
+	});
+
+	it("dangerouslyDisableDefaultSrc drops default-src instead of emitting a bare one", () => {
+		const bh = createBlackhole(
+			defineConfig({
+				// CSP only here; blackhole fails closed without a CSRF secret.
+				csrf: false,
+				securityHeaders: {
+					csp: {
+						directives: { "default-src": dangerouslyDisableDefaultSrc },
+					},
+				},
+			}),
+		);
+		const csp = bh.securityHeaders()["content-security-policy"] as string;
+
+		// A bare `default-src` forbids everything — the trap this marker exists
+		// to avoid. The rest of the baseline must survive.
+		expect(csp).not.toContain("default-src");
+		expect(csp).toContain("object-src 'none'");
+		expect(csp).toContain("base-uri 'self'");
+	});
+
+	it("null removes any directive, the same way", () => {
+		const bh = createBlackhole(
+			defineConfig({
+				// CSP only here; blackhole fails closed without a CSRF secret.
+				csrf: false,
+				securityHeaders: {
+					csp: { directives: { "upgrade-insecure-requests": null } },
+				},
+			}),
+		);
+		const csp = bh.securityHeaders()["content-security-policy"] as string;
+		expect(csp).not.toContain("upgrade-insecure-requests");
+		expect(csp).toContain("default-src 'self'");
 	});
 });

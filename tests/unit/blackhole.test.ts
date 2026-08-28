@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { configure } from "../../src/configure.js";
 import {
 	createBlackhole,
 	dangerouslyDisableDefaultSrc,
@@ -154,9 +155,11 @@ describe("blackhole", () => {
 		const h = createBlackhole({ secret: SECRET }).securityHeaders();
 		expect(h["x-content-type-options"]).toBe("nosniff");
 		expect(h["x-frame-options"]).toBe("SAMEORIGIN");
-		// Hardened baseline: base-uri/form-action/object-src don't fall back to default-src.
+		// Hardened baseline: base-uri/form-action/object-src don't fall back to
+		// default-src. `script-src` is spelled out and carries `@nonce`, which is
+		// dropped here because no nonce was supplied to this call.
 		expect(h["content-security-policy"]).toBe(
-			"default-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none'",
+			"default-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; script-src 'self'",
 		);
 		expect(
 			createBlackhole({
@@ -181,8 +184,17 @@ describe("blackhole", () => {
 		expect(bh.securityHeaders()["content-security-policy"]).not.toContain(
 			"@nonce",
 		);
-		// A static CSP (no @nonce) reports cspHasNonce=false.
-		expect(createBlackhole({ secret: SECRET }).cspHasNonce()).toBe(false);
+		// The DEFAULT policy carries `@nonce`, so a plain instance generates one:
+		// a server-rendered page emits inline scripts, and a default that
+		// forbids them renders a page that never comes alive.
+		expect(createBlackhole({ secret: SECRET }).cspHasNonce()).toBe(true);
+		// A policy written WITHOUT the token reports false.
+		expect(
+			createBlackhole({
+				securityHeaders: { csp: "default-src 'self'" },
+				secret: SECRET,
+			}).cspHasNonce(),
+		).toBe(false);
 	});
 
 	it("CORS: allows a configured origin + answers preflight", () => {
@@ -298,5 +310,60 @@ describe("CSP directive defaults and removal", () => {
 		const csp = bh.securityHeaders()["content-security-policy"] as string;
 		expect(csp).not.toContain("upgrade-insecure-requests");
 		expect(csp).toContain("default-src 'self'");
+	});
+});
+
+describe("blackhole > configure", () => {
+	/** Record what the hook asks the codemods to do. */
+	function recorder(): {
+		codemods: Parameters<typeof configure>[0];
+		calls: string[];
+		files: Map<string, string>;
+	} {
+		const calls: string[] = [];
+		const files = new Map<string, string>();
+		return {
+			calls,
+			files,
+			codemods: {
+				async addProvider(path: string) {
+					calls.push(`provider:${path}`);
+				},
+				async registerMiddleware(path: string, options?: { tier?: string }) {
+					calls.push(`middleware:${path}:${options?.tier ?? "default"}`);
+				},
+				async writeFile(path: string, content: string) {
+					calls.push(`file:${path}`);
+					files.set(path, content);
+				},
+			},
+		};
+	}
+
+	it("registers the middleware, not just the provider", async () => {
+		// The trap this exists to close: the provider only binds the instance
+		// into the container. Without the middleware line the response carries
+		// no security header at all, and nothing fails to say so.
+		const { codemods, calls } = recorder();
+		await configure(codemods);
+		expect(calls).toContain("provider:@c9up/blackhole/provider");
+		expect(calls).toContain("middleware:@c9up/blackhole/middleware:router");
+	});
+
+	it("puts the middleware on the router tier, after the body parser", async () => {
+		// The XSS filter reads request.body(); on the server tier it would run
+		// before the body exists.
+		const { codemods, calls } = recorder();
+		await configure(codemods);
+		const middleware = calls.find((c) => c.startsWith("middleware:"));
+		expect(middleware).toMatch(/:router$/);
+	});
+
+	it("writes a config that leaves CSRF off and says when to turn it on", async () => {
+		const { codemods, files } = recorder();
+		await configure(codemods);
+		const config = files.get("config/blackhole.ts") ?? "";
+		expect(config).toContain("csrf: false");
+		expect(config).toContain("APP_KEY");
 	});
 });

@@ -1,6 +1,6 @@
 {
   "name": "@c9up/blackhole",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Blackhole \u2014 Rust-native security filter (XSS, CSRF, rate-limiting) for any Node.js framework",
   "license": "MIT",
   "type": "module",
@@ -30,6 +30,10 @@
     "./config": {
       "types": "./src/config.ts",
       "import": "./src/config.ts"
+    },
+    "./configure": {
+      "types": "./src/configure.ts",
+      "import": "./src/configure.ts"
     },
     "./express": {
       "types": "./src/express.ts",
@@ -87,6 +91,10 @@
       "./config": {
         "types": "./dist/config.d.ts",
         "import": "./dist/config.js"
+      },
+      "./configure": {
+        "types": "./dist/configure.d.ts",
+        "import": "./dist/configure.js"
       },
       "./express": {
         "types": "./dist/express.d.ts",

@@ -238,7 +238,16 @@ const SECURITY_HEADERS_DEFAULTS: SecurityHeadersConfig = {
 	// an injected `<base href>` re-roots relative asset/script URLs and an
 	// injected `<form>` can POST credentials off-origin. `object-src 'none'`
 	// kills legacy plugin vectors (helmet hardens it the same way).
-	csp: "default-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none'",
+	// `script-src` is spelled out rather than left to fall back on `default-src`,
+	// and it names `@nonce`. Without it the default policy forbids EVERY inline
+	// script, which is what a server-rendered page emits to hydrate itself: the
+	// page then renders and silently never comes alive. AdonisJS sidesteps this
+	// by shipping its CSP disabled; a policy that works is worth more than one
+	// that has to be turned off.
+	//
+	// `@nonce` is substituted per request, and the value is handed to the view
+	// layer (`response.nonce`) so it can stamp its own inline scripts.
+	csp: "default-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; script-src 'self' @nonce",
 	referrerPolicy: "strict-origin-when-cross-origin",
 	permissionsPolicy: "camera=(), microphone=(), geolocation=()",
 };

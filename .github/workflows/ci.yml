@@ -23,6 +23,47 @@ concurrency:
 
 jobs:
 
+  # The cross-platform matrix below exists to produce the prebuilt binaries a
+  # release ships. Running it on every push to main costs five runners to
+  # rebuild what nobody downloads, so it is gated on the package version
+  # actually moving. Typecheck, lint and the test jobs are NOT gated: they run
+  # on every push, on ubuntu, building the host binary themselves.
+  #
+  # `workflow_dispatch` always passes the gate — that is how a release is cut —
+  # and so does anything else that is not a push.
+  version-gate:
+    name: Version bumped?
+    runs-on: ubuntu-latest
+    outputs:
+      bumped: ${{ steps.check.outputs.bumped }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # HEAD^ is what the version is read from for the comparison.
+          fetch-depth: 2
+      - id: check
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" != 'push' ]; then
+            echo 'bumped=true' >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ github.event_name }} — the matrix runs unconditionally"
+            exit 0
+          fi
+          # A missing HEAD^ (first commit on a fresh clone depth) leaves an
+          # empty previous version, which reads as a bump — the matrix runs.
+          # Erring towards building is the safe direction here.
+          git show 'HEAD^:package.json' > "$RUNNER_TEMP/previous.json" 2>/dev/null \
+            || echo '{}' > "$RUNNER_TEMP/previous.json"
+          previous=$(node -p "require('$RUNNER_TEMP/previous.json').version ?? ''")
+          current=$(node -p "require('$GITHUB_WORKSPACE/package.json').version")
+          if [ "$previous" = "$current" ]; then
+            echo 'bumped=false' >> "$GITHUB_OUTPUT"
+            echo "::notice::version unchanged ($current) — skipping the cross-platform matrix"
+          else
+            echo 'bumped=true' >> "$GITHUB_OUTPUT"
+            echo "::notice::version $previous -> $current — building the cross-platform matrix"
+          fi
+
   # Typecheck + lint quality gate — one ubuntu run (no matrix). Mirrors the
   # aggregate `verify:all` gate at the ream-dev root so a standalone clone of
   # this package enforces the same bar.
@@ -41,6 +82,8 @@ jobs:
       - run: pnpm lint
   build-and-test:
     name: Build & test (${{ matrix.suffix }})
+    needs: version-gate
+    if: needs.version-gate.outputs.bumped == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -130,6 +173,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
 
+  # vitest on the host platform, on every push. The matrix above runs the
+  # same suite across five targets, but only when the version moves — so
+  # without this job the TypeScript signal would disappear from an ordinary
+  # push along with it. Builds its own napi binary rather than waiting on
+  # the gated matrix for an artefact.
+  ts-tests:
+    name: TypeScript (vitest, linux-x64-gnu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+        with: { version: 9 }
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pnpm install
+      - run: pnpm build:napi
+      - run: pnpm exec vitest run
+
   # Publish job — gated on workflow_dispatch (manual maintainer trigger).
   # Requires NPM_TOKEN secret + a v<MAJOR>.<MINOR>.<PATCH> tag at HEAD matching
   # package.json. Drift gate refuses to overwrite a published version (or roll
@@ -141,7 +204,7 @@ jobs:
       # Creating the release needs write; the workflow default is read.
       contents: write
     timeout-minutes: 15
-    needs: [quality, build-and-test, cargo-tests]
+    needs: [quality, build-and-test, cargo-tests, ts-tests]
     if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v6

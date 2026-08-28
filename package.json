@@ -1,6 +1,6 @@
 {
   "name": "@c9up/blackhole",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "Blackhole \u2014 Rust-native security filter (XSS, CSRF, rate-limiting) for any Node.js framework",
   "license": "MIT",
   "type": "module",
@@ -48,7 +48,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "build:rust": "cargo build --release -p blackhole-engine-napi",
-    "build:napi": "pnpm build:rust && node scripts/copy-napi.mjs",
+    "build:napi": "pnpm build:rust && pnpm build:napi-types && node scripts/copy-napi.mjs",
+    "build:napi-types": "node scripts/build-napi-types.mjs",
     "test": "vitest run",
     "test:rust": "cargo test -p blackhole-engine",
     "lint": "biome check src/",

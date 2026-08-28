@@ -34,27 +34,6 @@ const platformMap: Record<string, string> = {
 	"win32-x64": "win32-x64-msvc",
 };
 
-interface NativeBlackhole {
-	generateCsrfToken(): string;
-	check(
-		method: string,
-		path: string,
-		query: string,
-		headersJson: string,
-		body: string,
-		remoteAddr: string,
-	): {
-		allowed: boolean;
-		status?: number;
-		body?: string;
-		headers?: Record<string, string>;
-		rateLimit?: RateLimitMeta;
-		/** Was CSRF actually enforced+validated for this request (vs merely seeded)? */
-		csrfEnforced?: boolean;
-	};
-	sanitizeResponse(body: string, contentType: string): string;
-}
-
 /** Rate-limit numbers the engine reports for `X-RateLimit-*` headers. */
 export interface RateLimitMeta {
 	/** Configured ceiling (`max`). */
@@ -65,20 +44,15 @@ export interface RateLimitMeta {
 	resetSeconds: number;
 }
 
-interface NativeModule {
-	Blackhole: new (
-		xssEnabled?: boolean,
-		csrfEnabled?: boolean,
-		rateLimitMax?: number,
-		rateLimitWindow?: number,
-		pathTraversal?: boolean,
-		paramPollution?: boolean,
-		csrfExceptRoutes?: string[],
-		csrfMethods?: string[],
-		csrfSecret?: string,
-		csrfTrustedOrigins?: string[],
-	) => NativeBlackhole;
-}
+/**
+ * What the `index.<platform>.node` binary exports.
+ *
+ * The class comes from `./native/generated.js` — written by
+ * `pnpm build:napi-types` from napi-derive's own `type-def` output — rather
+ * than restated here, where nothing would notice the engine gaining a
+ * constructor argument or changing what `check` returns.
+ */
+type NativeModule = typeof import("./native/generated.js");
 
 let native: NativeModule | undefined;
 

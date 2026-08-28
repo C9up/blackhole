@@ -38,7 +38,15 @@ impl Blackhole {
     }
 
     /// Check a request. Returns `{ allowed: true, request }` or `{ allowed: false, status, body }`.
-    #[napi]
+    ///
+    /// The value is built field by field below, so napi-rs cannot infer more
+    /// than `any` from `serde_json::Value` — the shape is declared here
+    /// instead, next to the code that builds it, and reaches TypeScript
+    /// through the generated declarations. Keep the two in step: a renamed
+    /// key here must be renamed there in the same edit.
+    #[napi(
+        ts_return_type = "{ allowed: boolean; status?: number; body?: string; headers?: Record<string, string>; rateLimit?: { limit: number; remaining: number; resetSeconds: number }; csrfEnforced?: boolean }"
+    )]
     pub fn check(&self, method: String, path: String, query: String, headers_json: String, body: String, remote_addr: String) -> Result<serde_json::Value> {
         let headers: std::collections::HashMap<String, String> =
             serde_json::from_str(&headers_json)

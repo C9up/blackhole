@@ -10,7 +10,7 @@
  *   providers: [() => import('@c9up/blackhole/provider')]
  */
 import type { BlackholeConfig } from "./config.js";
-import { createBlackhole } from "./index.js";
+import { type BlackholeOptions, createBlackhole } from "./index.js";
 
 interface BlackholeContainer {
 	singleton(token: unknown, factory: () => unknown): void;
@@ -27,6 +27,46 @@ export interface BlackholeAppContext {
 
 export const BLACKHOLE_KEY = "blackhole";
 
+/**
+ * The rate-limit options `createBlackhole` takes, with the configured store
+ * resolved.
+ *
+ * `default` + `stores` first — the form an environment variable can steer. A
+ * `store` instance is the single-store form kept for configs written against
+ * it. Naming a store that does not exist throws rather than falling back: an
+ * application that meant to share its counter across processes and silently
+ * got the in-process one would allow N times its limit without a sign.
+ */
+function resolveRateLimit(
+	rateLimit: BlackholeConfig["rateLimit"],
+): BlackholeOptions["rateLimit"] {
+	if (!rateLimit) return undefined;
+	const { default: name, stores, store, ...rest } = rateLimit;
+
+	if (stores && name !== undefined) {
+		const selected = stores[name];
+		if (!selected) {
+			const known = Object.keys(stores);
+			throw new Error(
+				`[blackhole] config.blackhole.rateLimit names the store '${name}', which is not in \`stores\`. ` +
+					(known.length > 0
+						? `Declared: ${known.join(", ")}.`
+						: "`stores` is empty — declare one with stores.memory() or stores.redis()."),
+			);
+		}
+		return { ...rest, store: selected() };
+	}
+
+	if (stores && name === undefined) {
+		throw new Error(
+			"[blackhole] config.blackhole.rateLimit declares `stores` but no `default` naming which one counts. " +
+				`Set default to one of: ${Object.keys(stores).join(", ")}.`,
+		);
+	}
+
+	return { ...rest, store };
+}
+
 export default class BlackholeProvider {
 	constructor(protected app: BlackholeAppContext) {}
 
@@ -36,7 +76,7 @@ export default class BlackholeProvider {
 			return createBlackhole({
 				xss: config.xss,
 				csrf: config.csrf,
-				rateLimit: config.rateLimit,
+				rateLimit: resolveRateLimit(config.rateLimit),
 				pathTraversal: config.pathTraversal,
 				paramPollution: config.paramPollution,
 				securityHeaders: config.securityHeaders,

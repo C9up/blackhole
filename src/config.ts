@@ -18,6 +18,7 @@ import type {
 	RateLimitStore,
 	SecurityHeadersConfig,
 } from "./index.js";
+import type { RateLimitStoreFactory } from "./stores.js";
 
 export interface BlackholeConfig {
 	/** Enable XSS response sanitization (default: true). */
@@ -42,9 +43,23 @@ export interface BlackholeConfig {
 		 */
 		keyFor?: (ctx: RateLimitContext) => string;
 		/**
-		 * Distributed counter for horizontal scale. When set, counting + the 429
-		 * decision run in JS against this store and the in-process Rust counter is
-		 * disabled. Omit for the single-process default.
+		 * Which named store counts — a key of {@link stores}. Read from the
+		 * environment in the generated config, so a deployment shares its counter
+		 * across processes without editing a file.
+		 */
+		default?: string;
+		/**
+		 * The counters this application can use, by name. Each is a factory from
+		 * `stores.*`, built only when it is the one selected.
+		 */
+		stores?: Record<string, RateLimitStoreFactory>;
+		/**
+		 * A ready-made store instance — the single-store form, kept for configs
+		 * written against it. Prefer `default` + `stores`.
+		 *
+		 * With either, counting and the 429 decision run in JS and the in-process
+		 * Rust counter is disabled. With neither, the Rust counter answers, which
+		 * is single-process only.
 		 */
 		store?: RateLimitStore;
 	};

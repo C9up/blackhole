@@ -837,3 +837,13 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		},
 	};
 }
+
+export { quasarConnection } from "./quasar.js";
+export {
+	MemoryRateLimitStore,
+	type RateLimitRedisClient,
+	type RateLimitRedisSource,
+	type RateLimitStoreFactory,
+	RedisRateLimitStore,
+	stores,
+} from "./stores.js";

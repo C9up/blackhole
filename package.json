@@ -57,9 +57,13 @@
     "prepublishOnly": "tsc -p tsconfig.build.json"
   },
   "peerDependencies": {
+    "@c9up/quasar": "^0.1.0",
     "@c9up/ream": "^0.2.0"
   },
   "peerDependenciesMeta": {
+    "@c9up/quasar": {
+      "optional": true
+    },
     "@c9up/ream": {
       "optional": true
     }

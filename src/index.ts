@@ -17,11 +17,12 @@
  *   import { createBlackhole } from '@c9up/blackhole'
  */
 
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { arch, platform } from "node:process";
 import { fileURLToPath } from "node:url";
+import { inProduction } from "./nodeEnv.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -629,6 +630,15 @@ export interface Blackhole {
 	): CorsResult | undefined;
 	/** Name + attributes of the `XSRF-TOKEN` cookie the middleware should seed. */
 	csrfCookie(): { name: string; options: Record<string, unknown> };
+	/**
+	 * Whether a token the client already holds still verifies.
+	 *
+	 * Used to decide whether to REISSUE the cookie, never to authorise
+	 * anything — the engine owns that decision, in `check()`. A disagreement
+	 * between the two therefore costs at most a needless reissue, which is why
+	 * repeating the signature check here is safe.
+	 */
+	csrfTokenIsValid(token: string): boolean;
 	/** Whether the readable `XSRF-TOKEN` cookie should be seeded at all. */
 	xsrfCookieEnabled(): boolean;
 	/** Whether a JS-side `exceptRoutes` predicate exempts this request. */
@@ -651,6 +661,67 @@ export interface Blackhole {
 const CSRF_COOKIE_NAME = "XSRF-TOKEN";
 
 /** Normalize the `csrf` option into a flat shape (boolean shorthand → full config). */
+/**
+ * Secrets that appear in scaffolding, documentation and tutorials.
+ *
+ * Deliberately duplicated rather than imported: blackhole depends on no other
+ * package in this workspace, and a security check that only holds when an
+ * optional peer happens to be installed is not a check.
+ */
+const PUBLICLY_KNOWN_SECRETS = new Set([
+	"change-me-to-a-unique-32+-byte-secret!!",
+	"change-me",
+	"your-app-key-here",
+	"secret",
+]);
+
+/**
+ * Refuse a secret that cannot sign anything.
+ *
+ * Presence is not enough: a CSRF token signed with a value printed in a README
+ * can be forged by anyone who has read it, which is the same as not signing at
+ * all — and worse, because the code says it is signed.
+ */
+function assertUsableSecret(secret: string): void {
+	if (PUBLICLY_KNOWN_SECRETS.has(secret.trim().toLowerCase())) {
+		throw new Error(
+			"[blackhole] the CSRF `secret` is a placeholder from the scaffolding, which everyone can read — " +
+				"anyone holding it can forge a valid CSRF token. Generate a real one with `ream generate:key`.",
+		);
+	}
+	if (secret.length < 16) {
+		throw new Error(
+			`[blackhole] the CSRF \`secret\` is ${secret.length} characters, too short to sign with. Use at least 16 (a 32-byte random key is the norm).`,
+		);
+	}
+}
+
+/**
+ * Whether a CSRF token still carries a valid signature under the app secret.
+ *
+ * The token is `<random>.<base64url HMAC-SHA256 of random>`, minted by the
+ * engine. This repeats that check in TypeScript so the request phase can tell
+ * a live token from a stale or mangled one WITHOUT crossing the native
+ * boundary for what is only a "should I reissue the cookie?" decision.
+ *
+ * It never authorises anything: `check()` in the engine remains the only thing
+ * that decides whether a request passes. So if the two ever disagreed, the
+ * cost is a cookie reissued once too often, not a request wrongly allowed.
+ */
+function verifyCsrfToken(token: string, secret: string | undefined): boolean {
+	if (!secret) return false;
+	const dot = token.indexOf(".");
+	if (dot <= 0 || dot === token.length - 1) return false;
+	const random = token.slice(0, dot);
+	const signature = token.slice(dot + 1);
+	const expected = createHmac("sha256", secret)
+		.update(random)
+		.digest("base64url");
+	const given = Buffer.from(signature, "utf8");
+	const want = Buffer.from(expected, "utf8");
+	return given.length === want.length && timingSafeEqual(given, want);
+}
+
 function resolveCsrf(csrf: boolean | CsrfConfig | undefined): {
 	enabled: boolean;
 	exceptRoutes: string[];
@@ -689,7 +760,7 @@ function resolveCsrf(csrf: boolean | CsrfConfig | undefined): {
 			httpOnly: cookie.httpOnly ?? false,
 			// Default Secure from the environment (parity with the session cookie),
 			// instead of leaving it off unless explicitly opted in.
-			secure: cookie.secure ?? process.env.NODE_ENV === "production",
+			secure: cookie.secure ?? inProduction(),
 		},
 	};
 }
@@ -717,6 +788,9 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 				"`secret` so CSRF tokens are signed (signed double-submit). Disable with " +
 				"`csrf: false` only if you have an alternative CSRF defense.",
 		);
+	}
+	if (csrf.enabled && options.secret) {
+		assertUsableSecret(options.secret);
 	}
 	// A distributed store moves counting + the 429 decision into JS (see
 	// `checkRateLimit`), so the in-process Rust counter must NOT also run — pass
@@ -809,6 +883,9 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		},
 		csrfCookie() {
 			return { name: CSRF_COOKIE_NAME, options: csrf.cookieOptions };
+		},
+		csrfTokenIsValid(token) {
+			return verifyCsrfToken(token, options.secret);
 		},
 		rateLimitKey(ctx) {
 			return rateLimit?.keyFor?.(ctx) ?? ctx.request.ip();

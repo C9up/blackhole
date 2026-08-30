@@ -149,6 +149,25 @@ export function serializeCookie(
 }
 
 /** Read a single cookie value from a raw `Cookie` header. */
+/**
+ * The CSRF token the client already holds, when it is still worth keeping.
+ *
+ * A cookie that no longer verifies — truncated by a proxy, mangled, or signed
+ * under a key that has since been rotated — is NOT reused: handing it back
+ * would leave the client submitting a token the server refuses on every form,
+ * with no way out but clearing cookies by hand. Reissuing costs one Set-Cookie
+ * and unsticks them.
+ */
+function usableCsrfToken(
+	bh: Blackhole,
+	req: { headers: Record<string, string> },
+): string | undefined {
+	const { name } = bh.csrfCookie();
+	const existing = readCookie(req.headers.cookie ?? "", name);
+	if (existing === undefined) return undefined;
+	return bh.csrfTokenIsValid(existing) ? existing : undefined;
+}
+
 function readCookie(cookieHeader: string, name: string): string | undefined {
 	const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	return cookieHeader.match(new RegExp(`(?:^|;\\s*)${escaped}=([^;]+)`))?.[1];
@@ -179,14 +198,21 @@ export function runRequestPhase(
 	// the NAPI boundary, so the exemption is decided here.
 	if (bh.csrfExempt({ method: req.method, path: req.path })) {
 		const { name, options } = bh.csrfCookie();
-		const existing = readCookie(req.headers.cookie ?? "", name);
+		const existing = usableCsrfToken(bh, req);
+		const csrfToken = existing ?? bh.generateCsrfToken();
 		return {
 			kind: "pass",
 			corsHeaders,
 			varyOrigin,
-			csrfToken: existing ?? bh.generateCsrfToken(),
+			csrfToken,
 			csrfProtected: false,
-			setCookie: undefined,
+			// Exemption skips VERIFICATION, not the cookie: a page served from
+			// an exempt route still hands the client a token, and the next
+			// protected request has to have somewhere to double-submit it from.
+			setCookie:
+				existing || !bh.xsrfCookieEnabled()
+					? undefined
+					: { name, value: csrfToken, options },
 			cspNonce: bh.cspHasNonce() ? bh.generateNonce() : undefined,
 		};
 	}
@@ -209,7 +235,7 @@ export function runRequestPhase(
 	}
 
 	const { name, options } = bh.csrfCookie();
-	const existing = readCookie(req.headers.cookie ?? "", name);
+	const existing = usableCsrfToken(bh, req);
 	const csrfToken = existing ?? bh.generateCsrfToken();
 	const cspNonce = bh.cspHasNonce() ? bh.generateNonce() : undefined;
 	return {

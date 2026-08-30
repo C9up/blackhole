@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import BlackholeProvider from "../../src/BlackholeProvider.js";
+import BlackholeProvider, {
+	type BlackholeAppContext,
+} from "../../src/BlackholeProvider.js";
 import type { BlackholeConfig } from "../../src/config.js";
 import {
 	MemoryRateLimitStore,
@@ -141,18 +143,15 @@ describe("blackhole > rate-limit stores", () => {
 	describe("selection", () => {
 		function blackholeFrom(config: BlackholeConfig): unknown {
 			const bindings = new Map<unknown, () => unknown>();
-			const app = {
+			const app: BlackholeAppContext = {
 				container: {
 					singleton(token: unknown, factory: () => unknown) {
 						bindings.set(token, factory);
 					},
-					resolve: <T>(token: unknown): T => bindings.get(token)?.() as T,
 				},
-				config: { get: <T>() => config as T },
+				config: { get: <T>(): T | undefined => config as T },
 			};
-			// biome-ignore lint/suspicious/noExplicitAny: the provider's app context
-			// is structural; the stub above is the slice register() touches.
-			new BlackholeProvider(app as any).register();
+			new BlackholeProvider(app).register();
 			return bindings.get("blackhole")?.();
 		}
 

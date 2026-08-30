@@ -407,3 +407,213 @@ describe("blackhole > adapters honour rateLimit.store (distributed limiting)", (
 		expect(spy.code).toBe(429);
 	});
 });
+
+describe("blackhole > what the adapters put on a request that passes", () => {
+	it("Express: sets the CORS headers and varies on Origin", async () => {
+		const mw = blackholeExpress({
+			csrf: false,
+			cors: { origin: ["https://app.acme.test"], credentials: true },
+		});
+		const { req, res } = mockExpress({
+			method: "GET",
+			headers: { origin: "https://app.acme.test" },
+		});
+		await mw(req, res, () => {});
+
+		expect(res.getHeader("access-control-allow-origin")).toBe(
+			"https://app.acme.test",
+		);
+		// Without Vary, a cache serves one origin's response to another.
+		expect(String(res.getHeader("vary"))).toContain("Origin");
+	});
+
+	it("Express: sets the rate-limit budget headers on a request it lets through", async () => {
+		const mw = blackholeExpress({
+			csrf: false,
+			rateLimit: {
+				max: 5,
+				windowSeconds: 60,
+				store: {
+					async increment() {
+						return { count: 2, resetSeconds: 30 };
+					},
+				},
+			},
+		});
+		const { req, res } = mockExpress({ method: "GET" });
+		await mw(req, res, () => {});
+
+		// A client that cannot see its remaining budget can only find the limit
+		// by hitting it.
+		expect(res.getHeader("x-ratelimit-limit")).toBe("5");
+		expect(res.getHeader("x-ratelimit-remaining")).toBe("3");
+	});
+
+	it("Express: reads a CSRF token out of a parsed body object", async () => {
+		// A body parser has already turned the form into an object by the time
+		// the adapter sees it, so the raw form string is gone.
+		const token = createBlackhole({ secret: SECRET }).generateCsrfToken();
+		const mw = blackholeExpress({ csrf: true, secret: SECRET });
+		const { req, res } = mockExpress({
+			method: "POST",
+			headers: { cookie: `XSRF-TOKEN=${token}` },
+			body: { _csrf: token, name: "Ada" },
+		});
+		let passed = false;
+		await mw(req, res, () => {
+			passed = true;
+		});
+
+		expect(passed).toBe(true);
+	});
+
+	it("Express: reads a header Node handed over as an array", async () => {
+		// `http` gives an array for any header that arrived more than once;
+		// dropping it would silently lose the token.
+		const token = createBlackhole({ secret: SECRET }).generateCsrfToken();
+		const mw = blackholeExpress({ csrf: true, secret: SECRET });
+		const { req, res } = mockExpress({ method: "POST" });
+		req.headers.cookie = [`XSRF-TOKEN=${token}`];
+		req.headers["x-xsrf-token"] = [token];
+		let passed = false;
+		await mw(req, res, () => {
+			passed = true;
+		});
+
+		expect(passed).toBe(true);
+	});
+
+	it("Fastify: answers a CORS preflight without reaching the route", async () => {
+		const { preValidation } = await registerFastify(
+			blackholeFastify({
+				csrf: false,
+				cors: { origin: ["https://app.acme.test"] },
+			}),
+		);
+		const { reply, spy } = mockReply();
+
+		await preValidation?.(
+			{
+				method: "OPTIONS",
+				url: "/orders",
+				headers: {
+					origin: "https://app.acme.test",
+					"access-control-request-method": "POST",
+				},
+			},
+			reply,
+			undefined,
+		);
+
+		expect(spy.code).toBe(204);
+		expect(reply.getHeader("access-control-allow-origin")).toBe(
+			"https://app.acme.test",
+		);
+		expect(String(reply.getHeader("vary"))).toContain("Origin");
+	});
+
+	it("Fastify: sets the CORS and rate-limit headers on a request it lets through", async () => {
+		const { preValidation } = await registerFastify(
+			blackholeFastify({
+				csrf: false,
+				cors: { origin: ["https://app.acme.test"] },
+				rateLimit: {
+					max: 5,
+					windowSeconds: 60,
+					store: {
+						async increment() {
+							return { count: 2, resetSeconds: 30 };
+						},
+					},
+				},
+			}),
+		);
+		const { reply, spy } = mockReply();
+
+		await preValidation?.(
+			{
+				method: "GET",
+				url: "/orders",
+				headers: { origin: "https://app.acme.test" },
+				ip: "1.2.3.4",
+			},
+			reply,
+			undefined,
+		);
+
+		expect(spy.code).toBeUndefined();
+		expect(reply.getHeader("access-control-allow-origin")).toBe(
+			"https://app.acme.test",
+		);
+		expect(reply.getHeader("x-ratelimit-remaining")).toBe("3");
+	});
+
+	it("Fastify: appends to an existing Vary rather than replacing it", async () => {
+		const { preValidation } = await registerFastify(
+			blackholeFastify({ csrf: false, cors: { origin: ["https://a.test"] } }),
+		);
+		const { reply } = mockReply();
+		reply.header("vary", "Accept-Encoding");
+
+		await preValidation?.(
+			{ method: "GET", url: "/", headers: { origin: "https://a.test" } },
+			reply,
+			undefined,
+		);
+
+		// Replacing it would silently un-vary the response on the header
+		// something else already depended on.
+		const vary = String(reply.getHeader("vary"));
+		expect(vary).toContain("Accept-Encoding");
+		expect(vary).toContain("Origin");
+	});
+
+	it("Fastify: reads a CSRF token out of a parsed body object", async () => {
+		const token = createBlackhole({ secret: SECRET }).generateCsrfToken();
+		const { preValidation } = await registerFastify(
+			blackholeFastify({ csrf: true, secret: SECRET }),
+		);
+		const { reply, spy } = mockReply();
+
+		await preValidation?.(
+			{
+				method: "POST",
+				url: "/orders",
+				headers: { cookie: `XSRF-TOKEN=${token}` },
+				body: { _csrf: token },
+			},
+			reply,
+			undefined,
+		);
+
+		expect(spy.code).toBeUndefined();
+	});
+
+	it("Fastify: carries the reject headers onto the refusal", async () => {
+		const { preValidation } = await registerFastify(
+			blackholeFastify({
+				csrf: false,
+				rateLimit: {
+					max: 1,
+					windowSeconds: 60,
+					store: {
+						async increment() {
+							return { count: 99, resetSeconds: 42 };
+						},
+					},
+				},
+			}),
+		);
+		const { reply, spy } = mockReply();
+
+		await preValidation?.(
+			{ method: "GET", url: "/", headers: {}, ip: "1.2.3.4" },
+			reply,
+			undefined,
+		);
+
+		expect(spy.code).toBe(429);
+		// A 429 without Retry-After tells the client to guess.
+		expect(reply.getHeader("retry-after")).toBe("42");
+	});
+});

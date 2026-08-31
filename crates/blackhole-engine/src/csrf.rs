@@ -150,7 +150,11 @@ impl CsrfValidator {
         let prefix = format!("{}=", self.body_field);
         body.split('&')
             .find_map(|pair| pair.strip_prefix(&prefix))
-            .map(|raw| urlencoding::decode(raw).map(|c| c.into_owned()).unwrap_or_else(|_| raw.to_string()))
+            .map(|raw| {
+                urlencoding::decode(raw)
+                    .map(|c| c.into_owned())
+                    .unwrap_or_else(|_| raw.to_string())
+            })
     }
 
     /// Does this request method require CSRF validation?
@@ -162,10 +166,12 @@ impl CsrfValidator {
     /// Is this path exempt from CSRF (matches an `exceptRoutes` pattern)?
     /// A pattern ending in `*` is a prefix match; otherwise an exact match.
     pub fn is_excepted(&self, path: &str) -> bool {
-        self.except_routes.iter().any(|pat| match pat.strip_suffix('*') {
-            Some(prefix) => path.starts_with(prefix),
-            None => path == pat,
-        })
+        self.except_routes
+            .iter()
+            .any(|pat| match pat.strip_suffix('*') {
+                Some(prefix) => path.starts_with(prefix),
+                None => path == pat,
+            })
     }
 
     /// Defense-in-depth Origin/Referer check for state-changing requests.
@@ -211,7 +217,10 @@ impl CsrfValidator {
 /// stripping any `scheme://` prefix and trailing path. Scheme is intentionally
 /// ignored (an http→https downgrade is HSTS's job, not CSRF's).
 fn origin_host(value: &str) -> Option<&str> {
-    let after_scheme = value.split_once("://").map(|(_, rest)| rest).unwrap_or(value);
+    let after_scheme = value
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(value);
     let host = after_scheme.split('/').next().unwrap_or(after_scheme);
     if host.is_empty() {
         None

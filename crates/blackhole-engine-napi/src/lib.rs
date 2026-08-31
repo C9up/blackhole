@@ -12,7 +12,18 @@ pub struct Blackhole {
 #[napi]
 impl Blackhole {
     #[napi(constructor)]
-    pub fn new(xss_enabled: Option<bool>, csrf_enabled: Option<bool>, rate_limit_max: Option<u32>, rate_limit_window: Option<u32>, path_traversal: Option<bool>, param_pollution: Option<bool>, csrf_except_routes: Option<Vec<String>>, csrf_methods: Option<Vec<String>>, csrf_secret: Option<String>, csrf_trusted_origins: Option<Vec<String>>) -> Self {
+    pub fn new(
+        xss_enabled: Option<bool>,
+        csrf_enabled: Option<bool>,
+        rate_limit_max: Option<u32>,
+        rate_limit_window: Option<u32>,
+        path_traversal: Option<bool>,
+        param_pollution: Option<bool>,
+        csrf_except_routes: Option<Vec<String>>,
+        csrf_methods: Option<Vec<String>>,
+        csrf_secret: Option<String>,
+        csrf_trusted_origins: Option<Vec<String>>,
+    ) -> Self {
         let rate_limit = match (rate_limit_max, rate_limit_window) {
             (Some(max), Some(window)) => Some((max, window as u64)),
             _ => None,
@@ -47,15 +58,33 @@ impl Blackhole {
     #[napi(
         ts_return_type = "{ allowed: boolean; status?: number; body?: string; headers?: Record<string, string>; rateLimit?: { limit: number; remaining: number; resetSeconds: number }; csrfEnforced?: boolean }"
     )]
-    pub fn check(&self, method: String, path: String, query: String, headers_json: String, body: String, remote_addr: String) -> Result<serde_json::Value> {
+    pub fn check(
+        &self,
+        method: String,
+        path: String,
+        query: String,
+        headers_json: String,
+        body: String,
+        remote_addr: String,
+    ) -> Result<serde_json::Value> {
         let headers: std::collections::HashMap<String, String> =
             serde_json::from_str(&headers_json)
                 .map_err(|e| Error::from_reason(format!("Invalid headers JSON: {}", e)))?;
-        let req = blackhole_engine::Request { method, path, query, headers, body, remote_addr };
-        let result = catch_unwind(std::panic::AssertUnwindSafe(|| self.filter.check_with_meta(req)));
+        let req = blackhole_engine::Request {
+            method,
+            path,
+            query,
+            headers,
+            body,
+            remote_addr,
+        };
+        let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.filter.check_with_meta(req)
+        }));
         match result {
             Ok((blackhole_engine::FilterResult::Allow(_), meta, csrf_enforced)) => {
-                let mut value = serde_json::json!({ "allowed": true, "csrfEnforced": csrf_enforced });
+                let mut value =
+                    serde_json::json!({ "allowed": true, "csrfEnforced": csrf_enforced });
                 if let Some(m) = meta {
                     value["rateLimit"] = serde_json::json!({ "limit": m.limit, "remaining": m.remaining, "resetSeconds": m.retry_after_secs });
                 }

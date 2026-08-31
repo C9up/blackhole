@@ -16,7 +16,6 @@ pub mod rate_limit;
 pub mod shield;
 pub mod xss;
 
-
 use std::collections::HashMap;
 
 // ─── Standalone types (no dependency on ream-http) ─────────────────────────────

@@ -59,7 +59,11 @@ impl RateLimiter {
         // Evict stale keys entirely on every call (cheap — only touches front of each deque)
         buckets.retain(|_, deque| {
             while let Some(front) = deque.front() {
-                if now.duration_since(*front) > self.window { deque.pop_front(); } else { break; }
+                if now.duration_since(*front) > self.window {
+                    deque.pop_front();
+                } else {
+                    break;
+                }
             }
             !deque.is_empty()
         });
@@ -81,13 +85,21 @@ impl RateLimiter {
 
         // Evict this key's expired entries
         while let Some(front) = deque.front() {
-            if now.duration_since(*front) > self.window { deque.pop_front(); } else { break; }
+            if now.duration_since(*front) > self.window {
+                deque.pop_front();
+            } else {
+                break;
+            }
         }
 
         // Seconds until the oldest in-window entry expires → when a slot frees.
         let retry_after_secs = deque
             .front()
-            .map(|front| self.window.saturating_sub(now.duration_since(*front)).as_secs())
+            .map(|front| {
+                self.window
+                    .saturating_sub(now.duration_since(*front))
+                    .as_secs()
+            })
             .unwrap_or(0);
 
         if deque.len() as u32 >= self.max_requests {
@@ -114,7 +126,10 @@ impl RateLimiter {
         let now = Instant::now();
         match buckets.get(key) {
             Some(deque) => {
-                let active = deque.iter().filter(|t| now.duration_since(**t) <= self.window).count() as u32;
+                let active = deque
+                    .iter()
+                    .filter(|t| now.duration_since(**t) <= self.window)
+                    .count() as u32;
                 self.max_requests.saturating_sub(active)
             }
             None => self.max_requests,

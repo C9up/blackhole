@@ -80,7 +80,12 @@ pub fn sanitize_response(body: &str, content_type: &str) -> String {
         // unsafe and strips them, leaving only the inner fragments. The
         // result is a broken document. The cheap structural test below
         // skips sanitisation when the body opens with `<!doctype` or `<html`.
-        let head: String = body.chars().take(16).collect::<String>().trim_start().to_ascii_lowercase();
+        let head: String = body
+            .chars()
+            .take(16)
+            .collect::<String>()
+            .trim_start()
+            .to_ascii_lowercase();
         if head.starts_with("<!doctype") || head.starts_with("<html") {
             return body.to_string();
         }
@@ -145,7 +150,8 @@ mod tests {
 
     #[test]
     fn test_sanitize_html_preserves_safe_tags() {
-        let input = r#"<div class="card"><h1>Title</h1><p>Text with <strong>bold</strong></p></div>"#;
+        let input =
+            r#"<div class="card"><h1>Title</h1><p>Text with <strong>bold</strong></p></div>"#;
         let result = sanitize_html(input);
         assert!(result.contains("<div"));
         assert!(result.contains("<h1>"));
@@ -211,7 +217,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_response_html() {
-        let result = sanitize_response("<p>Hello</p><script>alert(1)</script>", "text/html; charset=utf-8");
+        let result = sanitize_response(
+            "<p>Hello</p><script>alert(1)</script>",
+            "text/html; charset=utf-8",
+        );
         assert!(!result.contains("<script>"));
         assert!(result.contains("<p>Hello</p>"));
     }
@@ -235,7 +244,10 @@ mod tests {
     #[test]
     fn test_sanitize_response_no_content_type() {
         let result = sanitize_response("<script>xss</script>", "");
-        assert_eq!(result, "<script>xss</script>", "Empty content-type = no sanitization");
+        assert_eq!(
+            result, "<script>xss</script>",
+            "Empty content-type = no sanitization"
+        );
     }
 
     #[test]

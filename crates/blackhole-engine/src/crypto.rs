@@ -4,26 +4,27 @@
 //! them). This module is also not currently wired into the engine/napi crates —
 //! kept as available primitives (audit 2026-06-13).
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// HMAC-SHA256 sign. Returns base64url-encoded signature.
 pub fn hmac_sign(data: &str, secret: &[u8]) -> Result<String, String> {
-    let mut mac = HmacSha256::new_from_slice(secret)
-        .map_err(|e| format!("HMAC key error: {}", e))?;
+    let mut mac =
+        HmacSha256::new_from_slice(secret).map_err(|e| format!("HMAC key error: {}", e))?;
     mac.update(data.as_bytes());
     Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
 }
 
 /// HMAC-SHA256 verify (constant-time).
 pub fn hmac_verify(data: &str, signature: &str, secret: &[u8]) -> Result<bool, String> {
-    let mut mac = HmacSha256::new_from_slice(secret)
-        .map_err(|e| format!("HMAC key error: {}", e))?;
+    let mut mac =
+        HmacSha256::new_from_slice(secret).map_err(|e| format!("HMAC key error: {}", e))?;
     mac.update(data.as_bytes());
-    let sig_bytes = URL_SAFE_NO_PAD.decode(signature)
+    let sig_bytes = URL_SAFE_NO_PAD
+        .decode(signature)
         .map_err(|_| "Invalid signature encoding".to_string())?;
     Ok(mac.verify_slice(&sig_bytes).is_ok())
 }

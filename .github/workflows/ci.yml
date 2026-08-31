@@ -104,6 +104,12 @@ jobs:
         with:
           node-version: '22'
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      # Formatting is a gate, not a suggestion: left ungated, every one of these
+      # crates drifted, and the drift is only ever noticed when it takes a
+      # publish job down.
+      - run: cargo fmt --check
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 

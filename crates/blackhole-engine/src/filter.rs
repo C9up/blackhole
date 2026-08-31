@@ -50,7 +50,9 @@ pub struct BlackholeFilter {
 
 impl BlackholeFilter {
     pub fn new(config: BlackholeConfig) -> Self {
-        let rate_limiter = config.rate_limit.map(|(max, window)| RateLimiter::new(max, window));
+        let rate_limiter = config
+            .rate_limit
+            .map(|(max, window)| RateLimiter::new(max, window));
         let csrf_validator = CsrfValidator::with_routing(
             config.csrf_except_routes.clone(),
             config.csrf_methods.clone(),
@@ -64,7 +66,9 @@ impl BlackholeFilter {
         }
     }
 
-    pub fn config(&self) -> &BlackholeConfig { &self.config }
+    pub fn config(&self) -> &BlackholeConfig {
+        &self.config
+    }
 
     pub fn generate_csrf_token(&self) -> String {
         self.csrf_validator.generate_token()
@@ -94,7 +98,14 @@ impl BlackholeFilter {
             // Reject requests with no IP rather than sharing a global "unknown"
             // bucket — prevents unintentional DoS on all unauthenticated traffic.
             if request.remote_addr.is_empty() {
-                return (FilterResult::Reject(Response::json(400, r#"{"error":{"code":"MISSING_IP","message":"Cannot rate-limit: no remote address"}}"#)), None, false);
+                return (
+                    FilterResult::Reject(Response::json(
+                        400,
+                        r#"{"error":{"code":"MISSING_IP","message":"Cannot rate-limit: no remote address"}}"#,
+                    )),
+                    None,
+                    false,
+                );
             }
             let outcome = limiter.check_detailed(&request.remote_addr);
             rate_meta = Some(outcome);
@@ -102,35 +113,62 @@ impl BlackholeFilter {
                 // Emit backoff signals so well-behaved clients + proxies honour
                 // the limit (Retry-After + X-RateLimit-* — parity with @adonisjs/limiter).
                 let headers = vec![
-                    ("Retry-After".to_string(), outcome.retry_after_secs.to_string()),
+                    (
+                        "Retry-After".to_string(),
+                        outcome.retry_after_secs.to_string(),
+                    ),
                     ("X-RateLimit-Limit".to_string(), outcome.limit.to_string()),
                     ("X-RateLimit-Remaining".to_string(), "0".to_string()),
-                    ("X-RateLimit-Reset".to_string(), outcome.retry_after_secs.to_string()),
+                    (
+                        "X-RateLimit-Reset".to_string(),
+                        outcome.retry_after_secs.to_string(),
+                    ),
                 ];
-                return (FilterResult::Reject(Response::json_with_headers(
-                    429,
-                    r#"{"error":{"code":"E_RATE_LIMITED","message":"Too many requests"}}"#,
-                    headers,
-                )), rate_meta, false);
+                return (
+                    FilterResult::Reject(Response::json_with_headers(
+                        429,
+                        r#"{"error":{"code":"E_RATE_LIMITED","message":"Too many requests"}}"#,
+                        headers,
+                    )),
+                    rate_meta,
+                    false,
+                );
             }
         }
 
         if self.config.path_traversal && crate::shield::contains_traversal(&request.path) {
-            return (FilterResult::Reject(Response::json(400, r#"{"error":{"code":"E_PATH_TRAVERSAL","message":"Path traversal detected"}}"#)), rate_meta, false);
+            return (
+                FilterResult::Reject(Response::json(
+                    400,
+                    r#"{"error":{"code":"E_PATH_TRAVERSAL","message":"Path traversal detected"}}"#,
+                )),
+                rate_meta,
+                false,
+            );
         }
 
         if self.config.param_pollution {
             if let Some(dup) = crate::shield::first_duplicate_key(&request.query) {
                 let escaped = dup.replace('\\', r"\\").replace('"', r#"\""#);
-                return (FilterResult::Reject(Response::json(
-                    400,
-                    &format!(r#"{{"error":{{"code":"E_PARAMETER_POLLUTION","message":"Duplicate parameter: {}"}}}}"#, escaped),
-                )), rate_meta, false);
+                return (
+                    FilterResult::Reject(Response::json(
+                        400,
+                        &format!(
+                            r#"{{"error":{{"code":"E_PARAMETER_POLLUTION","message":"Duplicate parameter: {}"}}}}"#,
+                            escaped
+                        ),
+                    )),
+                    rate_meta,
+                    false,
+                );
             }
         }
 
         let v = &self.csrf_validator;
-        if self.config.csrf_enabled && v.requires_csrf(&request.method) && !v.is_excepted(&request.path) {
+        if self.config.csrf_enabled
+            && v.requires_csrf(&request.method)
+            && !v.is_excepted(&request.path)
+        {
             // Defense-in-depth: reject a state-changing request whose Origin /
             // Referer is cross-origin (and not trusted) BEFORE the token check —
             // this is what stops a planted-but-validly-signed token (sibling
@@ -143,7 +181,14 @@ impl BlackholeFilter {
                     .map(|(_, v)| v.as_str())
             };
             if !v.verify_origin(find("host"), find("origin"), find("referer")) {
-                return (FilterResult::Reject(Response::json(403, r#"{"error":{"code":"CSRF_ORIGIN_MISMATCH","message":"Cross-origin state-changing request rejected"}}"#)), rate_meta, false);
+                return (
+                    FilterResult::Reject(Response::json(
+                        403,
+                        r#"{"error":{"code":"CSRF_ORIGIN_MISMATCH","message":"Cross-origin state-changing request rejected"}}"#,
+                    )),
+                    rate_meta,
+                    false,
+                );
             }
 
             // Stateless double-submit: the token in the `XSRF-TOKEN` cookie must
@@ -171,7 +216,14 @@ impl BlackholeFilter {
                 // to turn a browser request into a flash + redirect back, the
                 // way Shield's own handler does. Shield does NOT distinguish a
                 // missing token from a mismatched one; neither do we.
-                return (FilterResult::Reject(Response::json(403, r#"{"error":{"code":"E_BAD_CSRF_TOKEN","message":"Invalid or expired CSRF token"}}"#)), rate_meta, false);
+                return (
+                    FilterResult::Reject(Response::json(
+                        403,
+                        r#"{"error":{"code":"E_BAD_CSRF_TOKEN","message":"Invalid or expired CSRF token"}}"#,
+                    )),
+                    rate_meta,
+                    false,
+                );
             }
         }
 
@@ -192,18 +244,35 @@ mod tests {
     use std::collections::HashMap;
 
     fn req(method: &str, path: &str) -> Request {
-        Request { method: method.into(), path: path.into(), query: String::new(), headers: HashMap::new(), body: String::new(), remote_addr: "127.0.0.1".into() }
+        Request {
+            method: method.into(),
+            path: path.into(),
+            query: String::new(),
+            headers: HashMap::new(),
+            body: String::new(),
+            remote_addr: "127.0.0.1".into(),
+        }
     }
 
     #[test]
     fn allows_get() {
-        let f = BlackholeFilter::new(BlackholeConfig { csrf_enabled: false, ..Default::default() });
-        assert!(matches!(f.check(req("GET", "/api")), FilterResult::Allow(_)));
+        let f = BlackholeFilter::new(BlackholeConfig {
+            csrf_enabled: false,
+            ..Default::default()
+        });
+        assert!(matches!(
+            f.check(req("GET", "/api")),
+            FilterResult::Allow(_)
+        ));
     }
 
     #[test]
     fn rate_limit_blocks() {
-        let f = BlackholeFilter::new(BlackholeConfig { rate_limit: Some((2, 60)), csrf_enabled: false, ..Default::default() });
+        let f = BlackholeFilter::new(BlackholeConfig {
+            rate_limit: Some((2, 60)),
+            csrf_enabled: false,
+            ..Default::default()
+        });
         assert!(matches!(f.check(req("GET", "/")), FilterResult::Allow(_)));
         assert!(matches!(f.check(req("GET", "/")), FilterResult::Allow(_)));
         assert!(matches!(f.check(req("GET", "/")), FilterResult::Reject(_)));
@@ -222,7 +291,14 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("x-xsrf-token".into(), token.clone());
         headers.insert("cookie".into(), format!("XSRF-TOKEN={}", token));
-        let r = Request { method: "POST".into(), path: "/".into(), query: String::new(), headers, body: String::new(), remote_addr: "127.0.0.1".into() };
+        let r = Request {
+            method: "POST".into(),
+            path: "/".into(),
+            query: String::new(),
+            headers,
+            body: String::new(),
+            remote_addr: "127.0.0.1".into(),
+        };
         assert!(matches!(f.check(r), FilterResult::Allow(_)));
     }
 
@@ -234,7 +310,14 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("x-csrf-token".into(), token.clone());
         headers.insert("cookie".into(), format!("XSRF-TOKEN={}", token));
-        let r = Request { method: "POST".into(), path: "/".into(), query: String::new(), headers, body: String::new(), remote_addr: "127.0.0.1".into() };
+        let r = Request {
+            method: "POST".into(),
+            path: "/".into(),
+            query: String::new(),
+            headers,
+            body: String::new(),
+            remote_addr: "127.0.0.1".into(),
+        };
         assert!(matches!(f.check(r), FilterResult::Allow(_)));
     }
 
@@ -245,7 +328,14 @@ mod tests {
         let token = f.generate_csrf_token();
         let mut headers = HashMap::new();
         headers.insert("cookie".into(), format!("XSRF-TOKEN={}", token));
-        let r = Request { method: "POST".into(), path: "/".into(), query: String::new(), headers, body: format!("name=x&_csrf={}", token), remote_addr: "127.0.0.1".into() };
+        let r = Request {
+            method: "POST".into(),
+            path: "/".into(),
+            query: String::new(),
+            headers,
+            body: format!("name=x&_csrf={}", token),
+            remote_addr: "127.0.0.1".into(),
+        };
         assert!(matches!(f.check(r), FilterResult::Allow(_)));
     }
 
@@ -256,9 +346,15 @@ mod tests {
             csrf_except_routes: vec!["/api/webhooks/*".into()],
             ..Default::default()
         });
-        assert!(matches!(f.check(req("POST", "/api/webhooks/stripe")), FilterResult::Allow(_)));
+        assert!(matches!(
+            f.check(req("POST", "/api/webhooks/stripe")),
+            FilterResult::Allow(_)
+        ));
         // …but a non-excepted POST still requires the token.
-        assert!(matches!(f.check(req("POST", "/api/users")), FilterResult::Reject(_)));
+        assert!(matches!(
+            f.check(req("POST", "/api/users")),
+            FilterResult::Reject(_)
+        ));
     }
 
     #[test]
@@ -267,7 +363,14 @@ mod tests {
         let f = BlackholeFilter::new(BlackholeConfig::default());
         let mut headers = HashMap::new();
         headers.insert("x-csrf-token".into(), f.generate_csrf_token());
-        let r = Request { method: "POST".into(), path: "/".into(), query: String::new(), headers, body: String::new(), remote_addr: "127.0.0.1".into() };
+        let r = Request {
+            method: "POST".into(),
+            path: "/".into(),
+            query: String::new(),
+            headers,
+            body: String::new(),
+            remote_addr: "127.0.0.1".into(),
+        };
         assert!(matches!(f.check(r), FilterResult::Reject(_)));
     }
 
@@ -282,7 +385,14 @@ mod tests {
         headers.insert("cookie".into(), format!("XSRF-TOKEN={}", token));
         headers.insert("host".into(), "app.test".into());
         headers.insert("origin".into(), "https://evil.test".into());
-        let r = Request { method: "POST".into(), path: "/".into(), query: String::new(), headers, body: String::new(), remote_addr: "127.0.0.1".into() };
+        let r = Request {
+            method: "POST".into(),
+            path: "/".into(),
+            query: String::new(),
+            headers,
+            body: String::new(),
+            remote_addr: "127.0.0.1".into(),
+        };
         assert!(matches!(f.check(r), FilterResult::Reject(_)));
     }
 
@@ -295,13 +405,24 @@ mod tests {
         headers.insert("cookie".into(), format!("XSRF-TOKEN={}", token));
         headers.insert("host".into(), "app.test".into());
         headers.insert("origin".into(), "https://app.test".into());
-        let r = Request { method: "POST".into(), path: "/".into(), query: String::new(), headers, body: String::new(), remote_addr: "127.0.0.1".into() };
+        let r = Request {
+            method: "POST".into(),
+            path: "/".into(),
+            query: String::new(),
+            headers,
+            body: String::new(),
+            remote_addr: "127.0.0.1".into(),
+        };
         assert!(matches!(f.check(r), FilterResult::Allow(_)));
     }
 
     #[test]
     fn rate_limit_reject_carries_retry_after() {
-        let f = BlackholeFilter::new(BlackholeConfig { rate_limit: Some((1, 60)), csrf_enabled: false, ..Default::default() });
+        let f = BlackholeFilter::new(BlackholeConfig {
+            rate_limit: Some((1, 60)),
+            csrf_enabled: false,
+            ..Default::default()
+        });
         assert!(matches!(f.check(req("GET", "/")), FilterResult::Allow(_)));
         match f.check(req("GET", "/")) {
             FilterResult::Reject(res) => {
@@ -315,9 +436,19 @@ mod tests {
 
     #[test]
     fn body_passes_through() {
-        let f = BlackholeFilter::new(BlackholeConfig { csrf_enabled: false, ..Default::default() });
+        let f = BlackholeFilter::new(BlackholeConfig {
+            csrf_enabled: false,
+            ..Default::default()
+        });
         let body = r#"{"name":"O'Brien"}"#.to_string();
-        let r = Request { method: "POST".into(), path: "/".into(), query: String::new(), headers: HashMap::new(), body: body.clone(), remote_addr: "127.0.0.1".into() };
+        let r = Request {
+            method: "POST".into(),
+            path: "/".into(),
+            query: String::new(),
+            headers: HashMap::new(),
+            body: body.clone(),
+            remote_addr: "127.0.0.1".into(),
+        };
         match f.check(r) {
             FilterResult::Allow(r) => assert_eq!(r.body, body),
             _ => panic!("should pass"),
@@ -326,7 +457,11 @@ mod tests {
 
     #[test]
     fn rate_limit_rejects_missing_ip() {
-        let f = BlackholeFilter::new(BlackholeConfig { rate_limit: Some((10, 60)), csrf_enabled: false, ..Default::default() });
+        let f = BlackholeFilter::new(BlackholeConfig {
+            rate_limit: Some((10, 60)),
+            csrf_enabled: false,
+            ..Default::default()
+        });
         let mut r = req("GET", "/");
         r.remote_addr = String::new();
         assert!(matches!(f.check(r), FilterResult::Reject(_)));

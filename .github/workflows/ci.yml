@@ -110,6 +110,9 @@ jobs:
       # crates drifted, and the drift is only ever noticed when it takes a
       # publish job down.
       - run: cargo fmt --check
+      # Two reporters on purpose: the JSON one feeds the smoke gate, the default
+      # one is what a human reads. With JSON alone a failure printed an exit
+      # code and not one word about which test failed.
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
@@ -123,7 +126,7 @@ jobs:
 
       - name: Vitest
         if: matrix.test
-        run: pnpm exec vitest run --reporter=json --outputFile=test-results.json
+        run: pnpm exec vitest run --reporter=default --reporter=json --outputFile=test-results.json
         shell: bash
 
       - name: Smoke gate — tests ran AND zero skipped (Linux/macOS)

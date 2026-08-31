@@ -109,7 +109,7 @@ impl BlackholeFilter {
                 ];
                 return (FilterResult::Reject(Response::json_with_headers(
                     429,
-                    r#"{"error":{"code":"RATE_LIMITED","message":"Too many requests"}}"#,
+                    r#"{"error":{"code":"E_RATE_LIMITED","message":"Too many requests"}}"#,
                     headers,
                 )), rate_meta, false);
             }

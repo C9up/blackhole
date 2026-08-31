@@ -151,7 +151,10 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 			}
 			ctx.response.status(429);
 			ctx.response.json({
-				error: { code: "RATE_LIMITED", message: "Too many requests" },
+				error: {
+					code: "E_BLACKHOLE_RATE_LIMITED",
+					message: "Too many requests",
+				},
 			});
 			return;
 		}

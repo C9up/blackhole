@@ -116,7 +116,10 @@ export function blackholeExpress(options: BlackholeOptions = {}) {
 					res.setHeader(name, value);
 				}
 				res.status(429).json({
-					error: { code: "RATE_LIMITED", message: "Too many requests" },
+					error: {
+						code: "E_BLACKHOLE_RATE_LIMITED",
+						message: "Too many requests",
+					},
 				});
 				return;
 			}

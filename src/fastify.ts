@@ -120,7 +120,10 @@ export function blackholeFastify(options: BlackholeOptions = {}) {
 						reply.header(name, value);
 					}
 					await reply.code(429).send({
-						error: { code: "RATE_LIMITED", message: "Too many requests" },
+						error: {
+							code: "E_BLACKHOLE_RATE_LIMITED",
+							message: "Too many requests",
+						},
 					});
 					return;
 				}

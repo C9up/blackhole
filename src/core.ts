@@ -94,11 +94,14 @@ function withIsoReset(
 
 /** Safe JSON parse — returns a fallback error envelope if body is not valid JSON. */
 export function safeJsonParse(body: string | undefined): unknown {
-	if (!body) return { error: { code: "BLOCKED", message: "Request rejected" } };
+	if (!body)
+		return {
+			error: { code: "E_BLACKHOLE_BLOCKED", message: "Request rejected" },
+		};
 	try {
 		return JSON.parse(body);
 	} catch {
-		return { error: { code: "BLOCKED", message: body } };
+		return { error: { code: "E_BLACKHOLE_BLOCKED", message: body } };
 	}
 }
 

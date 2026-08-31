@@ -1,5 +1,8 @@
 node_modules/
 target/
+# …including when it is a symlink pointing the build output elsewhere,
+# which `target/` does not match.
+target
 dist/
 coverage/
 *.node

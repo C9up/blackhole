@@ -11,6 +11,14 @@ pub struct Blackhole {
 
 #[napi]
 impl Blackhole {
+    // NAMED DEVIATION from `clippy::too_many_arguments`, and the one place a
+    // NAPI constraint genuinely decides the shape: napi-rs generates the
+    // JavaScript constructor signature FROM this parameter list, so folding
+    // these into a config struct would change `new Blackhole(a, b, c, …)` into
+    // `new Blackhole({ … })` for every consumer of a published binding. The
+    // idiomatic napi answer — a `#[napi(object)]` parameter — is a breaking
+    // change, not a refactor.
+    #[allow(clippy::too_many_arguments)]
     #[napi(constructor)]
     pub fn new(
         xss_enabled: Option<bool>,

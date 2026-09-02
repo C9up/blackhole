@@ -252,7 +252,7 @@ fn resolve_secret(secret: Vec<u8>) -> Vec<u8> {
 /// Returns Err if the OS entropy source is unavailable.
 fn generate_crypto_random_hex(bytes: usize) -> Result<String, String> {
     let mut buf = vec![0u8; bytes];
-    getrandom::getrandom(&mut buf).map_err(|e| format!("getrandom failed: {}", e))?;
+    getrandom::fill(&mut buf).map_err(|e| format!("getrandom failed: {}", e))?;
     Ok(buf.iter().map(|b| format!("{:02x}", b)).collect())
 }
 

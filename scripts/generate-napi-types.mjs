@@ -130,12 +130,15 @@ for (const fn of fns) {
   // napi-derive emits the whole declaration for a function, unlike a struct
   // where `def` holds only the members.
   const declaration = fn.def.trim()
-  out.push(
-    declaration.startsWith('export declare function')
-      ? `${declaration};`
-      : `export declare function ${fn.name}${declaration};`,
-    '',
-  )
+  // napi-derive 3 emits a bare `function name(...)` where 2 emitted the
+  // signature after the name; concatenating onto the former produced
+  // `function xfunction x(...)`.
+  const rendered = declaration.startsWith('export declare function')
+    ? declaration
+    : declaration.startsWith('function ')
+      ? `export declare ${declaration}`
+      : `export declare function ${fn.name}${declaration}`
+  out.push(`${rendered};`, '')
 }
 
 const stale = Object.keys(CALLBACK_REFINEMENTS).filter((k) => !used.has(k))

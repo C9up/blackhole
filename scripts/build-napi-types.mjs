@@ -7,7 +7,8 @@
  * cargo a `/tmp/...` path the native proc-macro cannot write to, so the
  * type-def file comes back empty and the build fails for no visible reason.
  *
- * One crate at a time on purpose: napi-derive APPENDS to `TYPE_DEF_TMP_PATH`
+ * One crate at a time on purpose: with napi-derive 2 the writes all went to a
+ * single `TYPE_DEF_TMP_PATH` and a parallel build interleaved them
  * while cargo compiles, and a parallel build interleaves the writes —
  * definitions go missing, silently, and the generated file comes out short.
  */
@@ -28,11 +29,11 @@ const scratch = mkdtempSync(join(tmpdir(), 'napi-types-'))
 try {
   const lines = []
   for (const crate of CRATES) {
-    const perCrate = join(scratch, `${crate}.jsonl`)
+    const perCrate = join(scratch, crate)
     writeFileSync(perCrate, '')
     execFileSync('cargo', ['build', '-p', crate], {
       cwd: packageRoot,
-      env: { ...process.env, TYPE_DEF_TMP_PATH: perCrate },
+      env: { ...process.env, NAPI_TYPE_DEF_TMP_FOLDER: scratch },
       stdio: ['ignore', 'ignore', 'inherit'],
     })
     const emitted = readFileSync(perCrate, 'utf8').split('\n').filter(Boolean)

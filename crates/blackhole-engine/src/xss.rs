@@ -13,6 +13,52 @@
 
 use std::collections::HashSet;
 
+/// CSS properties an untrusted fragment may set.
+///
+/// Presentation only. Deliberately absent: `position`, `top`/`left`/`right`/
+/// `bottom` and `z-index` (which together lift content out of the flow and
+/// over the rest of the page), and every property that takes a URL —
+/// `background`, `background-image`, `list-style-image`, `border-image`,
+/// `content`, `cursor`, `mask`, `filter` — each of which is an outbound
+/// request the page never asked for. `background-color` is kept: it is the
+/// half of `background` that cannot fetch anything.
+const SAFE_STYLE_PROPERTIES: [&str; 34] = [
+    "color",
+    "background-color",
+    "font",
+    "font-family",
+    "font-size",
+    "font-style",
+    "font-weight",
+    "font-variant",
+    "line-height",
+    "letter-spacing",
+    "text-align",
+    "text-decoration",
+    "text-indent",
+    "text-transform",
+    "white-space",
+    "word-break",
+    "vertical-align",
+    "margin",
+    "margin-top",
+    "margin-right",
+    "margin-bottom",
+    "margin-left",
+    "padding",
+    "padding-top",
+    "padding-right",
+    "padding-bottom",
+    "padding-left",
+    "border",
+    "border-color",
+    "border-style",
+    "border-width",
+    "border-radius",
+    "width",
+    "height",
+];
+
 /// Build the ammonia sanitizer (safe allow-list) used for untrusted fragments:
 /// - Keeps ammonia's default allow-list of safe tags; UNWRAPS everything else
 ///   (custom elements, non-allowlisted HTML5 tags) — NOT an "allow all tags" pass.
@@ -20,7 +66,8 @@ use std::collections::HashSet;
 ///   <object>, <embed>.
 /// - Strips all event-handler attributes (on*) and `javascript:` URIs (ammonia
 ///   default: only explicitly-allowed attributes/URIs survive).
-/// - Allows a set of safe generic attributes (class, id, style, data-*, aria-*).
+/// - Allows a set of generic attributes (class, id, data-*, aria-*, …), plus
+///   `style` narrowed to presentation-only properties.
 fn build_html_sanitizer() -> ammonia::Builder<'static> {
     let mut builder = ammonia::Builder::default();
 
@@ -34,6 +81,14 @@ fn build_html_sanitizer() -> ammonia::Builder<'static> {
             "title", "lang", "dir", "hidden", "slot", "part", "is"])
         // Allow data-* and aria-* attributes (ammonia handles these specially)
         .add_generic_attributes(["data-*"])
+        // `style` carries no script, but unrestricted it is still a takeover:
+        // `position:fixed` at full size covers the real page with the
+        // attacker's (a login form over the login form), and any `url(...)`
+        // makes the victim's browser call out to them. Neither needs a single
+        // character of JavaScript, so nothing above this line stops it.
+        // Restricting it to properties that only describe appearance keeps the
+        // legitimate `style="color:red"` working and removes both.
+        .filter_style_properties(HashSet::from(SAFE_STYLE_PROPERTIES))
         // Allow href/src but ammonia auto-strips javascript: URIs by default
         .link_rel(Some("noopener noreferrer"))
         // Strip all on* event handler attributes (ammonia does this by default —
@@ -50,6 +105,8 @@ fn build_html_sanitizer() -> ammonia::Builder<'static> {
 /// - Strips `javascript:` URIs
 /// - Keeps ammonia's safe tag allow-list and UNWRAPS anything else (custom
 ///   elements / non-allowlisted tags are removed, not preserved)
+/// - Restricts `style` to presentation properties — no `position`/`z-index`
+///   (page takeover) and nothing taking a `url()` (outbound request)
 /// - Never double-encodes existing HTML entities
 pub fn sanitize_html(input: &str) -> String {
     build_html_sanitizer().clean(input).to_string()

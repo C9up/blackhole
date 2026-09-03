@@ -19,6 +19,7 @@ import { BLACKHOLE_KEY } from "./BlackholeProvider.js";
 import {
 	appendVaryValue,
 	type CoreRequest,
+	csrfBodyString,
 	rateLimitHeaders,
 	runRequestPhase,
 	runResponsePhase,
@@ -164,13 +165,15 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 		}
 	}
 
-	const rawBody = ctx.request.body();
 	const req: CoreRequest = {
 		method: ctx.request.method(),
 		path: ctx.request.path(),
 		url: ctx.request.url(true),
 		headers: ctx.request.headers(),
-		body: typeof rawBody === "string" ? rawBody : undefined,
+		// Ream's body parser has already run, so a server-rendered form arrives
+		// as an object — the raw urlencoded string the engine would scan for
+		// `_csrf` no longer exists. Rebuild the field, as the other adapters do.
+		body: csrfBodyString(ctx.request.body()),
 		remoteAddr: rateLimitKey,
 	};
 	const outcome = runRequestPhase(bh, req);

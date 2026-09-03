@@ -14,6 +14,7 @@
 import {
 	appendVaryValue,
 	type CoreRequest,
+	csrfBodyString,
 	rateLimitHeaders,
 	runRequestPhase,
 	runResponsePhase,
@@ -74,15 +75,6 @@ function flattenHeaders(
 	return out;
 }
 
-function bodyString(body: unknown): string | undefined {
-	if (typeof body === "string") return body;
-	if (typeof body === "object" && body !== null && "_csrf" in body) {
-		const token = body._csrf;
-		if (typeof token === "string") return `_csrf=${encodeURIComponent(token)}`;
-	}
-	return undefined;
-}
-
 function appendVary(reply: FastifyReply, value: string): void {
 	const current = reply.getHeader("vary");
 	const base = typeof current === "string" ? current : "";
@@ -139,7 +131,7 @@ export function blackholeFastify(options: BlackholeOptions = {}) {
 					new URL(request.url, "http://localhost").pathname,
 				url: request.url,
 				headers: flattenHeaders(request.headers),
-				body: bodyString(request.body),
+				body: csrfBodyString(request.body),
 				remoteAddr: rateLimitKey,
 			};
 			const outcome = runRequestPhase(bh, coreReq);

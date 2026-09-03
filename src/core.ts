@@ -92,6 +92,27 @@ function withIsoReset(
 	};
 }
 
+/**
+ * The body string the engine reads the `_csrf` form field out of.
+ *
+ * A server-rendered form submits its token as a body field — that is what
+ * `csrfField()` is for — but every host parses the body before a middleware
+ * sees it, so what arrives is an object and the raw urlencoded string is gone.
+ * Rebuilding just the one field gives the engine something to find, without
+ * re-serialising a body it has no other use for.
+ *
+ * Shared by all three adapters on purpose: it lived in two of them, and the
+ * third silently rejected every server-rendered form because it did not.
+ */
+export function csrfBodyString(body: unknown): string | undefined {
+	if (typeof body === "string") return body;
+	if (typeof body === "object" && body !== null && "_csrf" in body) {
+		const token = Reflect.get(body, "_csrf");
+		if (typeof token === "string") return `_csrf=${encodeURIComponent(token)}`;
+	}
+	return undefined;
+}
+
 /** Safe JSON parse — returns a fallback error envelope if body is not valid JSON. */
 export function safeJsonParse(body: string | undefined): unknown {
 	if (!body)

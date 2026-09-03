@@ -13,6 +13,7 @@
 import {
 	appendVaryValue,
 	type CoreRequest,
+	csrfBodyString,
 	rateLimitHeaders,
 	runRequestPhase,
 	runResponsePhase,
@@ -64,20 +65,6 @@ function flattenHeaders(
 		else if (typeof value === "string") out[key] = value;
 	}
 	return out;
-}
-
-/**
- * Build the body string the Rust filter sees. The header path (`X-XSRF-TOKEN`)
- * covers SPAs; for server-rendered forms behind `body-parser`, reconstruct just
- * the `_csrf` field so the form-field validation still works.
- */
-function bodyString(body: unknown): string | undefined {
-	if (typeof body === "string") return body;
-	if (typeof body === "object" && body !== null && "_csrf" in body) {
-		const token = body._csrf;
-		if (typeof token === "string") return `_csrf=${encodeURIComponent(token)}`;
-	}
-	return undefined;
 }
 
 function appendVary(res: ExpressResponse, value: string): void {
@@ -133,7 +120,7 @@ export function blackholeExpress(options: BlackholeOptions = {}) {
 			path: req.path ?? new URL(req.url, "http://localhost").pathname,
 			url: req.originalUrl ?? req.url,
 			headers,
-			body: bodyString(req.body),
+			body: csrfBodyString(req.body),
 			remoteAddr: rateLimitKey,
 		};
 		const outcome = runRequestPhase(bh, coreReq);

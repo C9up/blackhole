@@ -51,12 +51,32 @@ export type RateLimitRedisSource =
  */
 export class MemoryRateLimitStore implements RateLimitStore {
 	readonly #windows = new Map<string, { count: number; expiresAt: number }>();
+	#lastSweep = Date.now();
+
+	/**
+	 * How often expired windows are cleared out.
+	 *
+	 * A window is only ever replaced when its own key comes back, so a key that
+	 * is seen once and never again used to stay for the life of the process.
+	 * Keys are clients, and an attacker picks them freely — a rotating
+	 * `X-Forwarded-For` grows this map until the process runs out of memory.
+	 * Sweeping bounds it by the traffic of one window instead.
+	 */
+	static readonly #SWEEP_INTERVAL_MS = 30_000;
+
+	/** How many windows are currently held. */
+	get size(): number {
+		return this.#windows.size;
+	}
 
 	async increment(
 		key: string,
 		windowSeconds: number,
 	): Promise<{ count: number; resetSeconds: number }> {
 		const now = Date.now();
+		if (now - this.#lastSweep >= MemoryRateLimitStore.#SWEEP_INTERVAL_MS) {
+			this.#sweep(now);
+		}
 		const current = this.#windows.get(key);
 		if (!current || current.expiresAt <= now) {
 			const expiresAt = now + windowSeconds * 1000;
@@ -68,6 +88,14 @@ export class MemoryRateLimitStore implements RateLimitStore {
 			count: current.count,
 			resetSeconds: Math.max(1, Math.ceil((current.expiresAt - now) / 1000)),
 		};
+	}
+
+	/** Drop every window that has already ended. */
+	#sweep(now: number): void {
+		for (const [key, window] of this.#windows) {
+			if (window.expiresAt <= now) this.#windows.delete(key);
+		}
+		this.#lastSweep = now;
 	}
 }
 
@@ -107,13 +135,18 @@ export class RedisRateLimitStore implements RateLimitStore {
 			return { count, resetSeconds: windowSeconds };
 		}
 		const ttl = await client.ttl(namespaced);
-		// A key with no expiry (-1) would count for ever; a missing one (-2) has
-		// just been evicted. Both are answered as a fresh window rather than a
-		// nonsensical reset time.
-		return {
-			count,
-			resetSeconds: ttl > 0 ? ttl : windowSeconds,
-		};
+		// A key with no expiry (-1) has lost the EXPIRE that should have followed
+		// its INCR — the process died in between, or Redis dropped the second
+		// command. Left alone the counter only climbs, so the client it belongs
+		// to is refused for good and nothing in the request path can undo it.
+		// Setting the expiry now costs one command and ends the lockout. (-2 is
+		// a key that vanished between the INCR and the TTL; EXPIRE finds nothing
+		// and does nothing, which is the right outcome too.)
+		if (ttl < 0) {
+			await client.expire(namespaced, windowSeconds);
+			return { count, resetSeconds: windowSeconds };
+		}
+		return { count, resetSeconds: ttl };
 	}
 }
 

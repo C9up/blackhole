@@ -10,9 +10,7 @@ use blackhole_engine::xss::sanitize_html;
 
 #[test]
 fn cannot_lift_content_over_the_page() {
-    let out = sanitize_html(
-        r#"<div style="position:fixed;top:0;left:0;z-index:99999">over</div>"#,
-    );
+    let out = sanitize_html(r#"<div style="position:fixed;top:0;left:0;z-index:99999">over</div>"#);
     assert!(!out.contains("position"), "{out}");
     assert!(!out.contains("z-index"), "{out}");
     assert!(!out.contains("top"), "{out}");

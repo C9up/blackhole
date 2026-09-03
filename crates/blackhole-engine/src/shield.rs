@@ -10,7 +10,38 @@ pub fn contains_traversal(path: &str) -> bool {
         return true;
     }
     let lower = path.to_ascii_lowercase();
-    lower.contains("%2e%2e") || lower.contains("%252e")
+    if lower.contains("%2e%2e") || lower.contains("%252e") {
+        return true;
+    }
+    // Matching encoded spellings literally only catches the ones written the
+    // same way twice. `%2e.` and `.%2e` are half-encoded, match none of the
+    // patterns above, and still decode to `..` — so decode and look again.
+    decodes_to_traversal(path)
+}
+
+/// Percent-decode up to twice and look for a literal `..`.
+///
+/// Twice because a proxy that decodes once turns `%252e%252e` into `%2e%2e`,
+/// which the next hop decodes into `..` — a request can therefore arrive
+/// encoded one level deeper than it will be read at. Decoding stops there: a
+/// third level has no hop left to unwrap it. A segment that will not decode
+/// (invalid UTF-8, a stray `%`) simply ends the walk — the literal checks above
+/// have already seen the raw form.
+fn decodes_to_traversal(path: &str) -> bool {
+    let mut current = path.to_string();
+    for _ in 0..2 {
+        let Ok(decoded) = urlencoding::decode(&current) else {
+            return false;
+        };
+        if decoded == current {
+            return false; // nothing left to unwrap
+        }
+        if decoded.contains("..") {
+            return true;
+        }
+        current = decoded.into_owned();
+    }
+    false
 }
 
 /// Walk the raw query string and surface the first duplicate key (after

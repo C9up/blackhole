@@ -17,8 +17,26 @@ use std::time::{Duration, Instant};
 /// Hard cap on the number of distinct keys held in memory. Bounds worst-case
 /// memory when keys are attacker-controlled (e.g. a spoofable `X-Forwarded-For`
 /// rotating fake IPs) — without it the bucket map grows unbounded within a
-/// window. At the cap, the oldest bucket is evicted to make room (LRU-ish).
+/// window. At the cap, an old bucket is evicted to make room (LRU-ish).
 const MAX_BUCKETS: usize = 100_000;
+
+/// How often the whole map is swept for expired buckets.
+///
+/// Sweeping on every request is what makes the limiter cost O(buckets) per
+/// request: at the cap that measured ~4ms, and since it all happens under one
+/// mutex it caps the whole server at a few hundred requests a second — a denial
+/// of service an attacker triggers just by varying the key. Amortising the
+/// sweep makes the common path touch one bucket instead of every bucket, and a
+/// full pass once a second is far cheaper than the memory it reclaims.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How many buckets an eviction looks at before choosing a victim.
+///
+/// The exact oldest bucket would mean scanning the whole map on every new key
+/// once it is full — the same O(buckets) cost, in the exact situation an
+/// attacker creates. A bounded sample gives approximate-LRU at a fixed price,
+/// which is all the cap needs: it exists to bound memory, not to be fair.
+const EVICTION_SAMPLE: usize = 64;
 
 /// Outcome of a rate-limit check, carrying the numbers needed to emit
 /// `Retry-After` / `X-RateLimit-*` headers so clients can back off.
@@ -34,7 +52,52 @@ pub struct RateLimitOutcome {
 pub struct RateLimiter {
     max_requests: u32,
     window: Duration,
-    buckets: Mutex<HashMap<String, VecDeque<Instant>>>,
+    state: Mutex<State>,
+}
+
+struct State {
+    buckets: HashMap<String, VecDeque<Instant>>,
+    /// When the map was last swept end to end, so the sweep can be amortised
+    /// instead of paid on every request.
+    last_sweep: Instant,
+}
+
+impl State {
+    /// Drop every entry older than the window, and every bucket left empty.
+    fn sweep(&mut self, now: Instant, window: Duration) {
+        self.buckets.retain(|_, deque| {
+            drop_expired(deque, now, window);
+            !deque.is_empty()
+        });
+        self.last_sweep = now;
+    }
+
+    /// Evict the oldest bucket among a bounded sample, to make room for a new
+    /// key once the map is at its cap.
+    fn evict_sampled(&mut self) {
+        let victim = self
+            .buckets
+            .iter()
+            .take(EVICTION_SAMPLE)
+            .filter_map(|(key, deque)| deque.front().map(|first| (key, *first)))
+            .min_by_key(|(_, first)| *first)
+            .map(|(key, _)| key.clone());
+        if let Some(key) = victim {
+            self.buckets.remove(&key);
+        }
+    }
+}
+
+/// Pop the entries that have fallen out of the window. The deque is ordered by
+/// arrival, so this only ever touches the front.
+fn drop_expired(deque: &mut VecDeque<Instant>, now: Instant, window: Duration) {
+    while let Some(front) = deque.front() {
+        if now.duration_since(*front) > window {
+            deque.pop_front();
+        } else {
+            break;
+        }
+    }
 }
 
 impl RateLimiter {
@@ -42,7 +105,10 @@ impl RateLimiter {
         Self {
             max_requests,
             window: Duration::from_secs(window_secs),
-            buckets: Mutex::new(HashMap::new()),
+            state: Mutex::new(State {
+                buckets: HashMap::new(),
+                last_sweep: Instant::now(),
+            }),
         }
     }
 
@@ -53,44 +119,30 @@ impl RateLimiter {
 
     /// Check a request and return the full outcome (limit / remaining / retry-after).
     pub fn check_detailed(&self, key: &str) -> RateLimitOutcome {
-        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
 
-        // Evict stale keys entirely on every call (cheap — only touches front of each deque)
-        buckets.retain(|_, deque| {
-            while let Some(front) = deque.front() {
-                if now.duration_since(*front) > self.window {
-                    deque.pop_front();
-                } else {
-                    break;
-                }
-            }
-            !deque.is_empty()
-        });
-
-        // Bound memory: if inserting a NEW key would exceed the cap, evict the
-        // bucket whose oldest entry is furthest in the past (closest to expiry).
-        if !buckets.contains_key(key) && buckets.len() >= MAX_BUCKETS {
-            if let Some(oldest) = buckets
-                .iter()
-                .filter_map(|(k, d)| d.front().map(|t| (k.clone(), *t)))
-                .min_by_key(|(_, t)| *t)
-                .map(|(k, _)| k)
-            {
-                buckets.remove(&oldest);
-            }
+        // Reclaim expired buckets across the whole map, but only now and then:
+        // this is the only O(buckets) work here, and paying it per request is
+        // what let a varying key stall every other request (see SWEEP_INTERVAL).
+        if now.duration_since(state.last_sweep) >= SWEEP_INTERVAL {
+            state.sweep(now, self.window);
         }
 
-        let deque = buckets.entry(key.to_string()).or_default();
-
-        // Evict this key's expired entries
-        while let Some(front) = deque.front() {
-            if now.duration_since(*front) > self.window {
-                deque.pop_front();
-            } else {
-                break;
-            }
+        // Bound memory: a new key that would push the map past its cap needs
+        // room made for it. No sweep here — one has run within the last
+        // SWEEP_INTERVAL by the branch above, so expired buckets are already
+        // gone and a second full pass would only re-walk 100k live ones.
+        if !state.buckets.contains_key(key) && state.buckets.len() >= MAX_BUCKETS {
+            state.evict_sampled();
         }
+
+        let window = self.window;
+        let deque = state.buckets.entry(key.to_string()).or_default();
+
+        // This key's own expired entries, which the amortised sweep may not
+        // have reached yet. Always paid, and only ever touches one bucket.
+        drop_expired(deque, now, window);
 
         // Seconds until the oldest in-window entry expires → when a slot frees.
         let retry_after_secs = deque
@@ -122,9 +174,9 @@ impl RateLimiter {
     }
 
     pub fn remaining(&self, key: &str) -> u32 {
-        let buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        match buckets.get(key) {
+        match state.buckets.get(key) {
             Some(deque) => {
                 let active = deque
                     .iter()

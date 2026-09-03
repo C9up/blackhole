@@ -1,8 +1,10 @@
 //! Crypto utilities — HMAC-SHA256 sign/verify + random bytes/hex.
 //!
-//! NOTE: AES-GCM and scrypt are NOT implemented here (the earlier doc claimed
-//! them). This module is also not currently wired into the engine/napi crates —
-//! kept as available primitives (audit 2026-06-13).
+//! NOTE: AES-GCM and scrypt are NOT implemented here (an earlier doc claimed
+//! them). `hmac_sign` / `hmac_verify` ARE load-bearing: they sign and verify
+//! every CSRF token (see `csrf.rs`), so their output is a compatibility
+//! surface, not an internal detail. `random_bytes` / `random_hex` have no
+//! caller yet — CSRF mints its own randomness straight from `getrandom`.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use hmac::{Hmac, KeyInit, Mac};

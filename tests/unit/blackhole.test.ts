@@ -260,7 +260,10 @@ describe("CSP directive defaults and removal", () => {
 				securityHeaders: {
 					csp: {
 						directives: {
-							"script-src": [...defaults["script-src"], "https://cdn.example"],
+							"script-src": [
+								...(defaults["script-src"] ?? []),
+								"https://cdn.example",
+							],
 						},
 					},
 				},
@@ -272,7 +275,7 @@ describe("CSP directive defaults and removal", () => {
 
 	it("hands back a copy, so mutating it cannot poison the next request", () => {
 		const first = getDefaultDirectives();
-		first["script-src"].push("https://evil.example");
+		first["script-src"]?.push("https://evil.example");
 		expect(getDefaultDirectives()["script-src"]).toEqual(["'self'"]);
 	});
 

@@ -52,7 +52,7 @@
     "build:napi-types": "node scripts/build-napi-types.mjs",
     "test": "vitest run",
     "test:rust": "cargo test -p blackhole-engine",
-    "lint": "biome check src/",
+    "lint": "biome check src/ tests/",
     "test:coverage": "vitest run --coverage",
     "prepublishOnly": "tsc -p tsconfig.build.json"
   },

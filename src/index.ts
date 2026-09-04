@@ -924,3 +924,10 @@ export {
 	RedisRateLimitStore,
 	stores,
 } from "./stores.js";
+
+export type {
+	UnsafeStatementDecision,
+	UnsafeStatementLike,
+	UnsafeStatementPolicy,
+} from "./unsafeStatement.js";
+export { onUnsafeStatement } from "./unsafeStatement.js";

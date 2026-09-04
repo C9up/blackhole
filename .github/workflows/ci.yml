@@ -130,7 +130,12 @@ jobs:
 
       - name: Vitest
         if: matrix.test
-        run: pnpm exec vitest run --coverage --reporter=default --reporter=json --outputFile=test-results.json
+        # No --coverage here: this matrix proves the NAPI binary loads on each
+        # platform, and a platform that skips a test measures less of the
+        # source. Gating coverage on whichever slice a runner happens to run
+        # sets the floor by the one that skips the most; it is measured once,
+        # on the host job below.
+        run: pnpm exec vitest run --reporter=default --reporter=json --outputFile=test-results.json
         shell: bash
 
       - name: Smoke gate — tests ran AND zero skipped (Linux/macOS)

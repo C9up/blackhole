@@ -189,7 +189,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --workspace
+      - run: cargo test --locked --workspace
 
   # vitest on the host platform, on every push. The matrix above runs the
   # same suite across five targets, but only when the version moves — so

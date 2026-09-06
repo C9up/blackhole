@@ -18,22 +18,8 @@
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import { arch, platform } from "node:process";
-import { fileURLToPath } from "node:url";
+import { loadNativeBinary } from "./vendor/nativeBinary.js";
 import { inProduction } from "./vendor/nodeEnv.js";
-
-const nodeRequire = createRequire(import.meta.url);
-const currentDir = dirname(fileURLToPath(import.meta.url));
-
-const platformMap: Record<string, string> = {
-	"linux-x64": "linux-x64-gnu",
-	"linux-arm64": "linux-arm64-gnu",
-	"darwin-x64": "darwin-x64",
-	"darwin-arm64": "darwin-arm64",
-	"win32-x64": "win32-x64-msvc",
-};
 
 /** Rate-limit numbers the engine reports for `X-RateLimit-*` headers. */
 export interface RateLimitMeta {
@@ -55,16 +41,10 @@ export interface RateLimitMeta {
  */
 type NativeModule = typeof import("./native/generated.js");
 
-let native: NativeModule | undefined;
-
-try {
-	const suffix = platformMap[`${platform}-${arch}`];
-	if (suffix) {
-		native = nodeRequire(join(currentDir, `../index.${suffix}.node`));
-	}
-} catch {
-	// Binary not available — createBlackhole will throw.
-}
+// Absent is not an error here: `createBlackhole` throws at use time, naming
+// what the caller was trying to do.
+const attempt = loadNativeBinary<NativeModule>();
+const native = attempt.loaded ? attempt.binary : undefined;
 
 /** Protective HTTP response headers (Helmet-style). */
 export interface SecurityHeadersConfig {

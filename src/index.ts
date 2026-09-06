@@ -22,7 +22,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { arch, platform } from "node:process";
 import { fileURLToPath } from "node:url";
-import { inProduction } from "./nodeEnv.js";
+import { inProduction } from "./vendor/nodeEnv.js";
 
 const nodeRequire = createRequire(import.meta.url);
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -760,6 +760,9 @@ function resolveCsrf(csrf: boolean | CsrfConfig | undefined): {
 			httpOnly: cookie.httpOnly ?? false,
 			// Default Secure from the environment (parity with the session cookie),
 			// instead of leaving it off unless explicitly opted in.
+			// Through `inProduction()`, never `NODE_ENV === "production"`:
+			// `NODE_ENV=prod` reads as "not production" verbatim, and this cookie
+			// would then ship without `Secure`, over plain HTTP, in production.
 			secure: cookie.secure ?? inProduction(),
 		},
 	};

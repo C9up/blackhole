@@ -26,7 +26,7 @@
  */
 
 import type { RateLimitStore } from "./index.js";
-import { inProduction } from "./nodeEnv.js";
+import { inProduction } from "./vendor/nodeEnv.js";
 
 /** The shape `@c9up/atlas`'s `db:unsafe` event has. Structural on purpose. */
 export interface UnsafeStatementLike {

@@ -1,14 +1,20 @@
+// Generated from scripts/vendor/nodeEnv.ts — do not edit.
+//
+// This package is published and built from its own repository, so the file
+// has to exist here rather than be imported. `pnpm vendor:sync` rewrites it,
+// and `pnpm vendor:check` fails if this copy has drifted from the original.
+
 /**
- * Reading `NODE_ENV`, with the aliases people actually set.
+ * `NODE_ENV`, read the way every runtime actually spells it.
  *
  * `NODE_ENV=prod` is ordinary in a Dockerfile or a platform dashboard, and a
- * bare `=== "production"` reads it as "not production" — which here means the
- * CSRF cookie ships without `Secure`, over plain HTTP, in production.
+ * bare `=== "production"` answers "not production" for it. What that costs
+ * differs per package, so the consequence is stated where the decision is
+ * taken, not here.
  *
- * The tables mirror the framework's. Deliberately duplicated rather than
- * imported: blackhole depends on no other package in this workspace, and a
- * security decision that only holds when an optional peer is installed is not
- * a decision.
+ * The tables mirror the framework's (`@c9up/ream`, src/env/nodeEnv.ts), which
+ * is the origin rather than a peer: it formats to different rules and exposes
+ * `currentNodeEnv()` instead of `inProduction()`.
  */
 
 const DEV_ENVS = ["dev", "develop", "development"];

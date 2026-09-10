@@ -1,7 +1,7 @@
 {
   "name": "@c9up/blackhole",
   "version": "0.1.20",
-  "description": "Blackhole \u2014 Rust-native security filter (XSS, CSRF, rate-limiting) for any Node.js framework",
+  "description": "Blackhole — Rust-native security filter (XSS, CSRF, rate-limiting) for any Node.js framework",
   "license": "MIT",
   "type": "module",
   "main": "./src/index.ts",
@@ -69,11 +69,11 @@
     }
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.10",
-    "@types/node": "^22.19.15",
-    "@vitest/coverage-v8": "^4.1.2",
-    "typescript": "^6.0.2",
-    "vitest": "^4.1.2"
+    "@biomejs/biome": "^2.5.12",
+    "@types/node": "^22.20.1",
+    "@vitest/coverage-v8": "4.1.11",
+    "typescript": "^6.0.3",
+    "vitest": "4.1.11"
   },
   "engines": {
     "node": ">=22.0.0"

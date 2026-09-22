@@ -4,3 +4,22 @@ members = [
   "crates/blackhole-engine",
   "crates/blackhole-engine-napi",
 ]
+
+# Production build.
+#
+# The default release profile leaves `lto = false` and `codegen-units = 16`, so
+# nothing inlines across crate boundaries — and in this cohort the hot loop and
+# the N-API binding that calls it are always two different crates. Measured on
+# atom: a scalar call through the binding went from 18.85 ms to 13.59 ms for
+# 50 000 operations (-28%), and a batch from 10.93 ms to 9.08 ms (-17%). Work
+# that stays inside one crate, like the bulk VM, gains a few percent.
+#
+# The cost is compile time — about twelve seconds instead of three on atom.
+#
+# No `panic = "abort"`: napi-rs catches panics and turns them into JavaScript
+# exceptions, and aborting would take the host application's process down with
+# a bug that was meant to surface as a caught error.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

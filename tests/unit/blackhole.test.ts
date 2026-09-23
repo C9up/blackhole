@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { configure } from "../../src/configure.js";
 import {
@@ -9,6 +11,27 @@ import {
 
 /** Signed double-submit needs a secret whenever CSRF is enabled. */
 const SECRET = "test-app-key-32-bytes-long-aaaaaa";
+
+/**
+ * Read a stub the way `codemods.makeUsingStub` does.
+ *
+ * The real file, not a fixture: a test that stubbed this out would pass with
+ * a stub that does not exist.
+ */
+function renderStub(
+	stubsRoot: string,
+	stubPath: string,
+	state: Record<string, string | number | boolean>,
+): { to: string; body: string } {
+	const raw = readFileSync(resolve(stubsRoot, stubPath), "utf8");
+	const [, front = "", body = ""] = raw.split(/^---\r?\n/m, 3);
+	const declared = /^to:\s*(.+)$/m.exec(front)?.[1]?.trim() ?? "";
+	const render = (text: string): string =>
+		text.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (match, key: string) =>
+			state[key] === undefined ? match : String(state[key]),
+		);
+	return { to: render(declared), body: render(body) };
+}
 
 describe("blackhole", () => {
 	it("allows a normal GET", () => {
@@ -338,6 +361,16 @@ describe("blackhole > configure", () => {
 				async writeFile(path: string, content: string) {
 					calls.push(`file:${path}`);
 					files.set(path, content);
+				},
+				async makeUsingStub(
+					stubsRoot: string,
+					stubPath: string,
+					state: Record<string, string | number | boolean> = {},
+				) {
+					const { to, body } = renderStub(stubsRoot, stubPath, state);
+					calls.push(`file:${to}`);
+					files.set(to, body);
+					return { path: to, contents: body };
 				},
 			},
 		};

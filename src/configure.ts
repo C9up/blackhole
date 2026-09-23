@@ -12,6 +12,8 @@
  * `codemods.registerMiddleware(...)` for you. This is the same hook.
  */
 
+import { stubsRoot } from "./stubs.js";
+
 interface Codemods {
 	addProvider(importPath: string): Promise<void>;
 	registerMiddleware(
@@ -23,6 +25,12 @@ interface Codemods {
 		content: string,
 		options?: { force?: boolean },
 	): Promise<void>;
+	makeUsingStub(
+		stubsRoot: string,
+		stubPath: string,
+		state?: Record<string, string | number | boolean>,
+		options?: { force?: boolean },
+	): Promise<{ path: string; contents: string }>;
 }
 
 export async function configure(codemods: Codemods): Promise<void> {
@@ -35,30 +43,5 @@ export async function configure(codemods: Codemods): Promise<void> {
 		tier: "router",
 	});
 
-	await codemods.writeFile(
-		"config/blackhole.ts",
-		`import { defineConfig } from '@c9up/blackhole'
-import env from '#start/env'
-
-export default defineConfig({
-  // Signs the CSRF double-submit token. Required once \`csrf\` is on.
-  secret: env.get('APP_KEY'),
-
-  // Off until the app has a form to protect. Turn it on with the first one:
-  // the same-origin guard covers a lot, but it is not a CSRF token.
-  csrf: false,
-
-  securityHeaders: {
-    // The default policy names \`@nonce\`, substituted per request. A view
-    // layer reads it from \`response.nonce\` and stamps its inline scripts —
-    // \`@c9up/aurora\` does this on its own. Serving inline scripts from
-    // another renderer means stamping them the same way, or the browser
-    // blocks them and the page never hydrates.
-    //
-    // Widen it here rather than removing it: a policy that is turned off
-    // protects nothing.
-  },
-})
-`,
-	);
+	await codemods.makeUsingStub(stubsRoot, "config/blackhole.stub");
 }

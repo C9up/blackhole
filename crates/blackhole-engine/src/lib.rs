@@ -31,6 +31,10 @@ pub struct Request {
     pub headers: HashMap<String, String>,
     pub body: String,
     pub remote_addr: String,
+    /// `http` or `https`, as the host resolved it (behind a trusted proxy,
+    /// from `X-Forwarded-Proto`). Empty when the host does not say — the CSRF
+    /// origin check then compares hosts only.
+    pub scheme: String,
 }
 
 /// Minimal response for rejected requests.
@@ -73,5 +77,5 @@ pub enum FilterResult {
     Reject(Response),
 }
 
-pub use filter::{BlackholeConfig, BlackholeFilter};
+pub use filter::{BlackholeConfig, BlackholeFilter, Checks};
 pub use xss::sanitize_response;

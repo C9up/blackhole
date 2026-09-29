@@ -31,12 +31,19 @@ impl Blackhole {
         csrf_methods: Option<Vec<String>>,
         csrf_secret: Option<String>,
         csrf_trusted_origins: Option<Vec<String>>,
-    ) -> Self {
+    ) -> Result<Self> {
         let rate_limit = match (rate_limit_max, rate_limit_window) {
+            // A limit of 0 or a window of 0 would let every request through
+            // (a zero window expires each hit at once): refused, not ignored.
+            (Some(0), _) | (_, Some(0)) => {
+                return Err(Error::from_reason(
+                    "[blackhole] rate limit max and window must be greater than 0",
+                ))
+            }
             (Some(max), Some(window)) => Some((max, window as u64)),
             _ => None,
         };
-        Self {
+        Ok(Self {
             filter: blackhole_engine::BlackholeFilter::new(blackhole_engine::BlackholeConfig {
                 xss_enabled: xss_enabled.unwrap_or(true),
                 csrf_enabled: csrf_enabled.unwrap_or(true),
@@ -48,7 +55,7 @@ impl Blackhole {
                 csrf_trusted_origins: csrf_trusted_origins.unwrap_or_default(),
                 csrf_secret: csrf_secret.map(String::into_bytes).unwrap_or_default(),
             }),
-        }
+        })
     }
 
     #[napi]
@@ -63,6 +70,10 @@ impl Blackhole {
     /// instead, next to the code that builds it, and reaches TypeScript
     /// through the generated declarations. Keep the two in step: a renamed
     /// key here must be renamed there in the same edit.
+    // Positional for the same NAPI reason as the constructor: the arguments
+    // are the generated JavaScript signature, and `scheme` and `checks` are
+    // appended last so a caller that does not pass them still works.
+    #[allow(clippy::too_many_arguments)]
     #[napi(
         ts_return_type = "{ allowed: boolean; status?: number; body?: string; headers?: Record<string, string>; rateLimit?: { limit: number; remaining: number; resetSeconds: number }; csrfEnforced?: boolean }"
     )]
@@ -74,7 +85,35 @@ impl Blackhole {
         headers_json: String,
         body: String,
         remote_addr: String,
+        scheme: Option<String>,
+        checks: Option<Vec<String>>,
     ) -> Result<serde_json::Value> {
+        // Some of `rateLimit` / `shield` / `csrf` run part of a split
+        // pipeline; none runs everything.
+        let checks = match checks {
+            None => blackhole_engine::Checks::ALL,
+            Some(names) => {
+                let mut checks = blackhole_engine::Checks {
+                    rate_limit: false,
+                    shield: false,
+                    csrf: false,
+                };
+                for name in &names {
+                    match name.as_str() {
+                        "rateLimit" => checks.rate_limit = true,
+                        "shield" => checks.shield = true,
+                        "csrf" => checks.csrf = true,
+                        other => {
+                            return Err(Error::from_reason(format!(
+                            "[blackhole] unknown check '{}' (expected rateLimit, shield or csrf)",
+                            other
+                        )))
+                        }
+                    }
+                }
+                checks
+            }
+        };
         let headers: std::collections::HashMap<String, String> =
             serde_json::from_str(&headers_json)
                 .map_err(|e| Error::from_reason(format!("Invalid headers JSON: {}", e)))?;
@@ -85,9 +124,10 @@ impl Blackhole {
             headers,
             body,
             remote_addr,
+            scheme: scheme.unwrap_or_default(),
         };
         let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.filter.check_with_meta(req)
+            self.filter.check_only(req, checks)
         }));
         match result {
             Ok((blackhole_engine::FilterResult::Allow(_), meta, csrf_enforced)) => {

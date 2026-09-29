@@ -112,12 +112,6 @@ pub fn sanitize_html(input: &str) -> String {
     build_html_sanitizer().clean(input).to_string()
 }
 
-/// Sanitize a plain text string for safe HTML embedding.
-/// Escapes all HTML special characters (< > & " ') without double-encoding.
-pub fn sanitize_text(input: &str) -> String {
-    ammonia::clean_text(input).to_string()
-}
-
 /// Sanitize a response body based on content type.
 /// - `text/html`: ammonia HTML sanitizer (parser-based, preserves safe wrapper
 ///   tags; a full document opening with `<!doctype>`/`<html>` passes through).
@@ -155,25 +149,6 @@ pub fn sanitize_response(body: &str, content_type: &str) -> String {
         // (robots.txt, plain-text APIs, CSV, …) for zero security gain.
         body.to_string()
     }
-}
-
-/// Check if a string contains potential XSS patterns (informational only).
-/// NOT used for sanitization decisions — ammonia handles all cases via parsing.
-pub fn contains_xss(input: &str) -> bool {
-    let lower = input.to_lowercase();
-    lower.contains("<script")
-        || lower.contains("javascript:")
-        || lower.contains("onerror=")
-        || lower.contains("onload=")
-        || lower.contains("onclick=")
-        || lower.contains("onfocus=")
-        || lower.contains("onmouseover=")
-}
-
-// Keep backward compat — old name delegates to sanitize_text
-#[doc(hidden)]
-pub fn sanitize_xss(input: &str) -> String {
-    sanitize_text(input)
 }
 
 #[cfg(test)]
@@ -252,24 +227,6 @@ mod tests {
         assert!(!result.contains("</script>"));
     }
 
-    // === Text sanitization tests ===
-
-    #[test]
-    fn test_sanitize_text_escapes() {
-        let result = sanitize_text("<script>alert('xss')</script>");
-        assert!(result.contains("&lt;script&gt;"));
-        assert!(!result.contains("<script>"));
-    }
-
-    #[test]
-    fn test_sanitize_text_normal() {
-        // ammonia::clean_text encodes spaces as &#32; — this is safe HTML text
-        let result = sanitize_text("hello world");
-        assert!(result.contains("hello"));
-        assert!(result.contains("world"));
-        assert!(!result.contains("<"));
-    }
-
     // === Response sanitization tests (standalone API) ===
 
     #[test]
@@ -312,30 +269,5 @@ mod tests {
         let result = sanitize_response("<script>xss</script><p>safe</p>", "Text/HTML");
         assert!(!result.contains("<script>"));
         assert!(result.contains("<p>safe</p>"));
-    }
-
-    // === Detection tests (informational) ===
-
-    #[test]
-    fn test_contains_xss_script_tag() {
-        assert!(contains_xss("<script>alert(1)</script>"));
-        assert!(contains_xss("<SCRIPT>alert(1)</SCRIPT>"));
-    }
-
-    #[test]
-    fn test_contains_xss_event_handlers() {
-        assert!(contains_xss("onerror=alert(1)"));
-        assert!(contains_xss("onload=fetch('evil')"));
-    }
-
-    #[test]
-    fn test_contains_xss_javascript_uri() {
-        assert!(contains_xss("javascript:alert(1)"));
-    }
-
-    #[test]
-    fn test_no_xss() {
-        assert!(!contains_xss("Hello World"));
-        assert!(!contains_xss("/api/orders?page=1"));
     }
 }

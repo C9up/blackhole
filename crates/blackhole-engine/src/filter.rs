@@ -42,6 +42,28 @@ impl Default for BlackholeConfig {
     }
 }
 
+/// Which checks a call runs.
+///
+/// `ALL` is one middleware doing everything. A host that splits its pipeline
+/// runs the shield (path traversal, parameter pollution) — and the rate limit,
+/// when its key needs nothing a later middleware sets — where every request
+/// passes, unmatched routes included; then the CSRF check, and the rate limit
+/// if it was left, once the body is parsed. Each request is counted once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Checks {
+    pub rate_limit: bool,
+    pub shield: bool,
+    pub csrf: bool,
+}
+
+impl Checks {
+    pub const ALL: Checks = Checks {
+        rate_limit: true,
+        shield: true,
+        csrf: true,
+    };
+}
+
 pub struct BlackholeFilter {
     config: BlackholeConfig,
     rate_limiter: Option<RateLimiter>,
@@ -93,22 +115,62 @@ impl BlackholeFilter {
         &self,
         request: Request,
     ) -> (FilterResult, Option<RateLimitOutcome>, bool) {
+        self.check_only(request, Checks::ALL)
+    }
+
+    /// `check_with_meta` running only `checks` — see [`Checks`]. The CSRF
+    /// verdict (third element) is `false` when the CSRF check did not run.
+    pub fn check_only(
+        &self,
+        request: Request,
+        checks: Checks,
+    ) -> (FilterResult, Option<RateLimitOutcome>, bool) {
         let mut rate_meta: Option<RateLimitOutcome> = None;
+        if checks.rate_limit {
+            if let Some(rejection) = self.check_rate_limit(&request, &mut rate_meta) {
+                return (FilterResult::Reject(rejection), rate_meta, false);
+            }
+        }
+        if checks.shield {
+            if let Some(rejection) = self.check_shield(&request) {
+                return (FilterResult::Reject(rejection), rate_meta, false);
+            }
+        }
+        if !checks.csrf {
+            return (FilterResult::Allow(request), rate_meta, false);
+        }
+        if let Some(rejection) = self.check_csrf(&request) {
+            return (FilterResult::Reject(rejection), rate_meta, false);
+        }
+
+        // Reaching here past the CSRF check means the token was validated iff
+        // its guard was true — recompute that exact predicate. `v`
+        // (`&self.csrf_validator`) stays the single matcher for method-guarding
+        // + `exceptRoutes`.
+        let v = &self.csrf_validator;
+        let csrf_enforced = self.config.csrf_enabled
+            && v.requires_csrf(&request.method)
+            && !v.is_excepted(&request.path);
+        (FilterResult::Allow(request), rate_meta, csrf_enforced)
+    }
+
+    /// The rate limit, counted under `remote_addr`. The rejection, if any.
+    fn check_rate_limit(
+        &self,
+        request: &Request,
+        rate_meta: &mut Option<RateLimitOutcome>,
+    ) -> Option<Response> {
         if let Some(ref limiter) = self.rate_limiter {
             // Reject requests with no IP rather than sharing a global "unknown"
             // bucket — prevents unintentional DoS on all unauthenticated traffic.
             if request.remote_addr.is_empty() {
-                return (
-                    FilterResult::Reject(Response::json(
-                        400,
-                        r#"{"error":{"code":"MISSING_IP","message":"Cannot rate-limit: no remote address"}}"#,
-                    )),
-                    None,
-                    false,
-                );
+                return Some(Response::json(
+                    400,
+                    r#"{"error":{"code":"E_BLACKHOLE_MISSING_IP","message":"Cannot rate-limit: no remote address"}}"#,
+                ));
             }
             let outcome = limiter.check_detailed(&request.remote_addr);
-            rate_meta = Some(outcome);
+            *rate_meta = Some(outcome);
             if !outcome.allowed {
                 // Emit backoff signals so well-behaved clients + proxies honour
                 // the limit (Retry-After + X-RateLimit-* — parity with @adonisjs/limiter).
@@ -124,46 +186,44 @@ impl BlackholeFilter {
                         outcome.retry_after_secs.to_string(),
                     ),
                 ];
-                return (
-                    FilterResult::Reject(Response::json_with_headers(
-                        429,
-                        r#"{"error":{"code":"E_RATE_LIMITED","message":"Too many requests"}}"#,
-                        headers,
-                    )),
-                    rate_meta,
-                    false,
-                );
+                return Some(Response::json_with_headers(
+                    429,
+                    r#"{"error":{"code":"E_BLACKHOLE_RATE_LIMITED","message":"Too many requests"}}"#,
+                    headers,
+                ));
             }
         }
 
+        None
+    }
+
+    /// Path traversal and parameter pollution. The rejection, if any.
+    fn check_shield(&self, request: &Request) -> Option<Response> {
         if self.config.path_traversal && crate::shield::contains_traversal(&request.path) {
-            return (
-                FilterResult::Reject(Response::json(
-                    400,
-                    r#"{"error":{"code":"E_PATH_TRAVERSAL","message":"Path traversal detected"}}"#,
-                )),
-                rate_meta,
-                false,
-            );
+            return Some(Response::json(
+                400,
+                r#"{"error":{"code":"E_BLACKHOLE_PATH_TRAVERSAL","message":"Path traversal detected"}}"#,
+            ));
         }
 
         if self.config.param_pollution {
             if let Some(dup) = crate::shield::first_duplicate_key(&request.query) {
                 let escaped = dup.replace('\\', r"\\").replace('"', r#"\""#);
-                return (
-                    FilterResult::Reject(Response::json(
-                        400,
-                        &format!(
-                            r#"{{"error":{{"code":"E_PARAMETER_POLLUTION","message":"Duplicate parameter: {}"}}}}"#,
-                            escaped
-                        ),
-                    )),
-                    rate_meta,
-                    false,
-                );
+                return Some(Response::json(
+                    400,
+                    &format!(
+                        r#"{{"error":{{"code":"E_BLACKHOLE_PARAMETER_POLLUTION","message":"Duplicate parameter: {}"}}}}"#,
+                        escaped
+                    ),
+                ));
             }
         }
 
+        None
+    }
+
+    /// The Origin check and the signed double-submit token. The rejection, if any.
+    fn check_csrf(&self, request: &Request) -> Option<Response> {
         let v = &self.csrf_validator;
         if self.config.csrf_enabled
             && v.requires_csrf(&request.method)
@@ -180,15 +240,12 @@ impl BlackholeFilter {
                     .find(|(k, _)| k.eq_ignore_ascii_case(name))
                     .map(|(_, v)| v.as_str())
             };
-            if !v.verify_origin(find("host"), find("origin"), find("referer")) {
-                return (
-                    FilterResult::Reject(Response::json(
-                        403,
-                        r#"{"error":{"code":"CSRF_ORIGIN_MISMATCH","message":"Cross-origin state-changing request rejected"}}"#,
-                    )),
-                    rate_meta,
-                    false,
-                );
+            let scheme = Some(request.scheme.as_str()).filter(|s| !s.is_empty());
+            if !v.verify_origin(find("host"), scheme, find("origin"), find("referer")) {
+                return Some(Response::json(
+                    403,
+                    r#"{"error":{"code":"E_BLACKHOLE_CSRF_ORIGIN_MISMATCH","message":"Cross-origin state-changing request rejected"}}"#,
+                ));
             }
 
             // Stateless double-submit: the token in the `XSRF-TOKEN` cookie must
@@ -216,25 +273,14 @@ impl BlackholeFilter {
                 // to turn a browser request into a flash + redirect back, the
                 // way Shield's own handler does. Shield does NOT distinguish a
                 // missing token from a mismatched one; neither do we.
-                return (
-                    FilterResult::Reject(Response::json(
-                        403,
-                        r#"{"error":{"code":"E_BAD_CSRF_TOKEN","message":"Invalid or expired CSRF token"}}"#,
-                    )),
-                    rate_meta,
-                    false,
-                );
+                return Some(Response::json(
+                    403,
+                    r#"{"error":{"code":"E_BAD_CSRF_TOKEN","message":"Invalid or expired CSRF token"}}"#,
+                ));
             }
         }
 
-        // Reaching here past the CSRF block means the token was validated iff the
-        // block's guard was true — recompute that exact predicate (it borrows
-        // `request` before the move into `Allow`). `v` (`&self.csrf_validator`)
-        // stays the single matcher for method-guarding + `exceptRoutes`.
-        let csrf_enforced = self.config.csrf_enabled
-            && v.requires_csrf(&request.method)
-            && !v.is_excepted(&request.path);
-        (FilterResult::Allow(request), rate_meta, csrf_enforced)
+        None
     }
 }
 
@@ -251,6 +297,7 @@ mod tests {
             headers: HashMap::new(),
             body: String::new(),
             remote_addr: "127.0.0.1".into(),
+            scheme: String::new(),
         }
     }
 
@@ -278,6 +325,45 @@ mod tests {
         assert!(matches!(f.check(req("GET", "/")), FilterResult::Reject(_)));
     }
 
+    const SHIELD: Checks = Checks {
+        rate_limit: true,
+        shield: true,
+        csrf: false,
+    };
+    const CSRF: Checks = Checks {
+        rate_limit: false,
+        shield: false,
+        csrf: true,
+    };
+
+    #[test]
+    fn a_split_pipeline_leaves_csrf_for_later() {
+        let f = BlackholeFilter::new(BlackholeConfig::default());
+        let (result, _, enforced) = f.check_only(req("POST", "/"), SHIELD);
+        assert!(matches!(result, FilterResult::Allow(_)));
+        assert!(!enforced);
+        let (result, _, _) = f.check_only(req("GET", "/../etc"), SHIELD);
+        assert!(matches!(result, FilterResult::Reject(_)));
+    }
+
+    #[test]
+    fn the_csrf_half_does_not_count_the_request_again() {
+        let f = BlackholeFilter::new(BlackholeConfig {
+            rate_limit: Some((1, 60)),
+            ..Default::default()
+        });
+        let (first, meta, _) = f.check_only(req("GET", "/"), SHIELD);
+        assert!(matches!(first, FilterResult::Allow(_)));
+        assert!(meta.is_some());
+        // The same request's CSRF half: no second hit on the limiter.
+        let (csrf, meta, _) = f.check_only(req("GET", "/"), CSRF);
+        assert!(matches!(csrf, FilterResult::Allow(_)));
+        assert!(meta.is_none());
+        // And it still refuses a POST without a token.
+        let (post, _, _) = f.check_only(req("POST", "/"), CSRF);
+        assert!(matches!(post, FilterResult::Reject(_)));
+    }
+
     #[test]
     fn csrf_blocks_post() {
         let f = BlackholeFilter::new(BlackholeConfig::default());
@@ -298,6 +384,7 @@ mod tests {
             headers,
             body: String::new(),
             remote_addr: "127.0.0.1".into(),
+            scheme: String::new(),
         };
         assert!(matches!(f.check(r), FilterResult::Allow(_)));
     }
@@ -317,6 +404,7 @@ mod tests {
             headers,
             body: String::new(),
             remote_addr: "127.0.0.1".into(),
+            scheme: String::new(),
         };
         assert!(matches!(f.check(r), FilterResult::Allow(_)));
     }
@@ -335,6 +423,7 @@ mod tests {
             headers,
             body: format!("name=x&_csrf={}", token),
             remote_addr: "127.0.0.1".into(),
+            scheme: String::new(),
         };
         assert!(matches!(f.check(r), FilterResult::Allow(_)));
     }
@@ -370,6 +459,7 @@ mod tests {
             headers,
             body: String::new(),
             remote_addr: "127.0.0.1".into(),
+            scheme: String::new(),
         };
         assert!(matches!(f.check(r), FilterResult::Reject(_)));
     }
@@ -392,6 +482,7 @@ mod tests {
             headers,
             body: String::new(),
             remote_addr: "127.0.0.1".into(),
+            scheme: String::new(),
         };
         assert!(matches!(f.check(r), FilterResult::Reject(_)));
     }
@@ -412,6 +503,7 @@ mod tests {
             headers,
             body: String::new(),
             remote_addr: "127.0.0.1".into(),
+            scheme: String::new(),
         };
         assert!(matches!(f.check(r), FilterResult::Allow(_)));
     }
@@ -448,6 +540,7 @@ mod tests {
             headers: HashMap::new(),
             body: body.clone(),
             remote_addr: "127.0.0.1".into(),
+            scheme: String::new(),
         };
         match f.check(r) {
             FilterResult::Allow(r) => assert_eq!(r.body, body),

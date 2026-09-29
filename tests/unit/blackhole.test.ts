@@ -386,13 +386,15 @@ describe("blackhole > configure", () => {
 		expect(calls).toContain("middleware:@c9up/blackhole/middleware:router");
 	});
 
-	it("puts the middleware on the router tier, after the body parser", async () => {
-		// The XSS filter reads request.body(); on the server tier it would run
-		// before the body exists.
+	it("registers the guards on the server tier and CSRF on the router tier", async () => {
+		// The server tier sees a 404 too; the CSRF check reads the parsed body,
+		// so it runs after the body parser.
 		const { codemods, calls } = recorder();
 		await configure(codemods);
-		const middleware = calls.find((c) => c.startsWith("middleware:"));
-		expect(middleware).toMatch(/:router$/);
+		expect(calls).toContain(
+			"middleware:@c9up/blackhole/server_middleware:server",
+		);
+		expect(calls).toContain("middleware:@c9up/blackhole/middleware:router");
 	});
 
 	it("writes a config that leaves CSRF off and says when to turn it on", async () => {

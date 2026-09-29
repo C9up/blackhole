@@ -34,6 +34,8 @@ interface FastifyRequest {
 	headers: Record<string, string | string[] | undefined>;
 	body?: unknown;
 	ip?: string;
+	/** `http` / `https` — honours Fastify's `trustProxy`. */
+	protocol?: string;
 	/** CSRF token for this request (Adonis idiom). Seeded by the adapter. */
 	csrfToken?: string;
 }
@@ -133,6 +135,7 @@ export function blackholeFastify(options: BlackholeOptions = {}) {
 				headers: flattenHeaders(request.headers),
 				body: csrfBodyString(request.body),
 				remoteAddr: rateLimitKey,
+				protocol: request.protocol,
 			};
 			const outcome = runRequestPhase(bh, coreReq);
 

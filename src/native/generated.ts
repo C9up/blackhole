@@ -34,6 +34,8 @@ export declare class Blackhole {
 		headersJson: string,
 		body: string,
 		remoteAddr: string,
+		scheme?: string | undefined | null,
+		checks?: Array<string> | undefined | null,
 	): {
 		allowed: boolean;
 		status?: number;

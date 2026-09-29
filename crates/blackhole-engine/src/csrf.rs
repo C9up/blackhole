@@ -180,8 +180,14 @@ impl CsrfValidator {
     /// it was minted for *this* user — an attacker who plants a token they were
     /// legitimately issued (sibling-subdomain `Set-Cookie`, MITM on an http
     /// subdomain) passes the token check. Verifying that the request's `Origin`
-    /// (or `Referer` fallback) is same-origin with the `Host` header closes that
-    /// gap: the attacker's page has a different origin.
+    /// (or `Referer` fallback) is same-origin with the request closes that gap:
+    /// the attacker's page has a different origin.
+    ///
+    /// Same-origin means the same host AND the same scheme when the request's
+    /// `scheme` is known: `http://app.test` is another origin than
+    /// `https://app.test`, and a page served over plain HTTP is exactly what a
+    /// MITM controls. A trusted origin written with a scheme matches that
+    /// scheme only.
     ///
     /// Returns `true` (allow) when neither header is present — non-browser API
     /// clients omit them, and the token check still applies. Returns `false`
@@ -189,6 +195,7 @@ impl CsrfValidator {
     pub fn verify_origin(
         &self,
         host: Option<&str>,
+        scheme: Option<&str>,
         origin: Option<&str>,
         referer: Option<&str>,
     ) -> bool {
@@ -196,42 +203,40 @@ impl CsrfValidator {
             Some(s) if !s.is_empty() => s,
             _ => return true, // no browser-set header → fall through to the token check
         };
-        let source_host = match origin_host(source) {
-            Some(h) => h,
+        let (source_scheme, source_host) = match split_origin(source) {
+            Some(parts) => parts,
             None => return false, // malformed Origin/Referer on an unsafe verb
         };
+        let scheme_matches = |expected: Option<&str>| match (expected, source_scheme) {
+            (None, _) => true,
+            (Some(e), Some(s)) => e.eq_ignore_ascii_case(s),
+            (Some(_), None) => false,
+        };
         if let Some(h) = host {
-            if source_host.eq_ignore_ascii_case(h) {
+            if source_host.eq_ignore_ascii_case(h) && scheme_matches(scheme) {
                 return true;
             }
         }
         self.trusted_origins.iter().any(|trusted| {
-            origin_host(trusted)
-                .map(|th| th.eq_ignore_ascii_case(source_host))
+            split_origin(trusted)
+                .map(|(ts, th)| th.eq_ignore_ascii_case(source_host) && scheme_matches(ts))
                 .unwrap_or(false)
         })
     }
 }
 
-/// Extract the `host[:port]` from an Origin / Referer / trusted-origin value,
-/// stripping any `scheme://` prefix and trailing path. Scheme is intentionally
-/// ignored (an http→https downgrade is HSTS's job, not CSRF's).
-fn origin_host(value: &str) -> Option<&str> {
-    let after_scheme = value
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(value);
+/// Split an Origin / Referer / trusted-origin value into its scheme (when it
+/// has one) and its `host[:port]`, dropping any trailing path.
+fn split_origin(value: &str) -> Option<(Option<&str>, &str)> {
+    let (scheme, after_scheme) = match value.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, value),
+    };
     let host = after_scheme.split('/').next().unwrap_or(after_scheme);
     if host.is_empty() {
         None
     } else {
-        Some(host)
-    }
-}
-
-impl Default for CsrfValidator {
-    fn default() -> Self {
-        Self::new(Vec::new())
+        Some((scheme, host))
     }
 }
 
@@ -383,19 +388,52 @@ mod tests {
     fn verify_origin_allows_same_origin_and_missing_headers() {
         let v = vd();
         // No Origin/Referer → allow (non-browser client; token check still applies).
-        assert!(v.verify_origin(Some("app.test"), None, None));
+        assert!(v.verify_origin(Some("app.test"), None, None, None));
         // Same-origin Origin → allow.
-        assert!(v.verify_origin(Some("app.test"), Some("https://app.test"), None));
+        assert!(v.verify_origin(Some("app.test"), None, Some("https://app.test"), None));
         // Same-origin via Referer fallback → allow.
-        assert!(v.verify_origin(Some("app.test"), None, Some("https://app.test/page")));
+        assert!(v.verify_origin(Some("app.test"), None, None, Some("https://app.test/page")));
     }
 
     #[test]
     fn verify_origin_rejects_cross_origin() {
         let v = vd();
-        assert!(!v.verify_origin(Some("app.test"), Some("https://evil.test"), None));
+        assert!(!v.verify_origin(Some("app.test"), None, Some("https://evil.test"), None));
         // Malformed Origin on an unsafe verb → reject.
-        assert!(!v.verify_origin(Some("app.test"), Some("://"), None));
+        assert!(!v.verify_origin(Some("app.test"), None, Some("://"), None));
+    }
+
+    #[test]
+    fn verify_origin_compares_the_scheme_when_the_request_has_one() {
+        let v = vd();
+        let https = Some("https");
+        assert!(v.verify_origin(Some("app.test"), https, Some("https://app.test"), None));
+        // A page over plain HTTP — what a MITM serves — is another origin.
+        assert!(!v.verify_origin(Some("app.test"), https, Some("http://app.test"), None));
+        assert!(!v.verify_origin(Some("app.test"), https, None, Some("http://app.test/page")));
+        assert!(v.verify_origin(
+            Some("app.test"),
+            Some("http"),
+            Some("http://app.test"),
+            None
+        ));
+        // A source without a scheme cannot be shown to match.
+        assert!(!v.verify_origin(Some("app.test"), https, Some("app.test"), None));
+    }
+
+    #[test]
+    fn verify_origin_matches_a_trusted_scheme() {
+        let v = CsrfValidator::with_routing(
+            Vec::new(),
+            Vec::new(),
+            vec!["https://admin.test".to_string(), "partner.test".to_string()],
+            TEST_SECRET.to_vec(),
+        );
+        let https = Some("https");
+        assert!(v.verify_origin(Some("app.test"), https, Some("https://admin.test"), None));
+        assert!(!v.verify_origin(Some("app.test"), https, Some("http://admin.test"), None));
+        // Written without a scheme, a trusted origin matches either.
+        assert!(v.verify_origin(Some("app.test"), https, Some("http://partner.test"), None));
     }
 
     #[test]
@@ -406,8 +444,8 @@ mod tests {
             vec!["https://admin.test".to_string()],
             TEST_SECRET.to_vec(),
         );
-        assert!(v.verify_origin(Some("app.test"), Some("https://admin.test"), None));
-        assert!(!v.verify_origin(Some("app.test"), Some("https://other.test"), None));
+        assert!(v.verify_origin(Some("app.test"), None, Some("https://admin.test"), None));
+        assert!(!v.verify_origin(Some("app.test"), None, Some("https://other.test"), None));
     }
 
     #[test]

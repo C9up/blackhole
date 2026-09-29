@@ -21,13 +21,15 @@ import {
 	type CoreRequest,
 	csrfBodyString,
 	rateLimitHeaders,
-	runRequestPhase,
+	runCsrfPhase,
+	runGuardPhase,
 	runResponsePhase,
 } from "./core.js";
 import {
 	type Blackhole,
 	type BlackholeOptions,
 	createBlackhole,
+	type EngineCheck,
 } from "./index.js";
 
 /**
@@ -65,6 +67,8 @@ export interface ReamContext {
 		headers(): Readonly<Record<string, string>>;
 		body(): unknown;
 		ip(): string;
+		/** `http` / `https`, trusted-proxy aware (Ream's `request.protocol()`). */
+		protocol?(): string;
 		/** CSRF token for this request (Adonis idiom: `request.csrfToken`). Seeded by the middleware. */
 		csrfToken?: string;
 		/**
@@ -116,13 +120,30 @@ function isBlackhole(value: unknown): value is Blackhole {
 	);
 }
 
+/**
+ * The protective headers (CSP, HSTS, nosniff…) on whatever this response turns
+ * out to be. Set on the refusals too — a 403 or a 429 is still a page a
+ * browser renders — and before the handler runs, so a response the exception
+ * handler builds after a throw carries them as well.
+ */
+function applySecurityHeaders(
+	ctx: ReamContext,
+	bh: Blackhole,
+	nonce?: string,
+): void {
+	for (const [name, value] of Object.entries(bh.securityHeaders(nonce))) {
+		ctx.response.header(name, value);
+	}
+}
+
 /** Append `value` to the context's `Vary` header (dedup, via the shared helper). */
 function appendVary(ctx: ReamContext, value: string): void {
 	const next = appendVaryValue(ctx.response.getHeader("vary") ?? "", value);
 	ctx.response.header("vary", next);
 }
 
-export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
+/** The `Blackhole` the provider registered, from the request's own resolver. */
+async function resolveBlackhole(ctx: ReamContext): Promise<Blackhole> {
 	// Resolve the Blackhole instance from the request's IoC resolver
 	// (`ctx.containerResolver`, Adonis idiom) — reading from the context Ream
 	// hands us, NOT by importing `@c9up/ream/services/app`. That keeps blackhole
@@ -133,16 +154,35 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 			"[BLACKHOLE_NOT_REGISTERED] BlackholeProvider must register BLACKHOLE_KEY before the middleware runs, and the host must expose ctx.containerResolver.",
 		);
 	}
-	const bh = resolved;
+	return resolved;
+}
 
+/**
+ * Requests the server-tier middleware already guarded, so the router-tier one
+ * runs only what is left — and the limiter counts each request once.
+ */
+const guardedByServer = new WeakSet<object>();
+
+/**
+ * The guard phase on a Ream context: the rate limit (the distributed store in
+ * JS, or the engine's counter) when `checks` has it, the shield, and CORS.
+ * Answers a refusal or a preflight itself and returns `true`; otherwise sets
+ * the CORS, budget and protective headers and returns `false`.
+ */
+async function guard(
+	ctx: ReamContext,
+	bh: Blackhole,
+	checks: EngineCheck[],
+): Promise<boolean> {
 	// Rate-limit key: the configured `keyFor(ctx)` (per-user / per-route) or the
 	// client IP by default. Used both as the distributed-store key and as the
 	// key the in-process Rust counter buckets on (passed as `remoteAddr`).
-	const rateLimitKey = bh.rateLimitKey(ctx);
+	const countHere = checks.includes("rateLimit");
+	const rateLimitKey = countHere ? bh.rateLimitKey(ctx) : "";
 
 	// Distributed store path: count + decide in JS (Redis, etc.) so the limit is
 	// shared across instances — the Rust in-process counter is off in this mode.
-	if (bh.hasRateLimitStore()) {
+	if (countHere && bh.hasRateLimitStore()) {
 		const decision = await bh.checkRateLimit(rateLimitKey);
 		const rlHeaders = rateLimitHeaders(decision);
 		if (!decision.allowed) {
@@ -150,6 +190,7 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 			for (const [name, value] of Object.entries(rlHeaders)) {
 				ctx.response.header(name, value);
 			}
+			applySecurityHeaders(ctx, bh);
 			ctx.response.status(429);
 			ctx.response.json({
 				error: {
@@ -157,7 +198,7 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 					message: "Too many requests",
 				},
 			});
-			return;
+			return true;
 		}
 		// Allowed: surface the budget on the successful response below.
 		for (const [name, value] of Object.entries(rlHeaders)) {
@@ -165,7 +206,44 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 		}
 	}
 
-	const req: CoreRequest = {
+	const outcome = runGuardPhase(bh, coreRequest(ctx, rateLimitKey), checks);
+	if (outcome.kind === "reject") {
+		// Rate-limit rejections carry Retry-After / X-RateLimit-* so clients back off.
+		for (const [name, value] of Object.entries(outcome.headers ?? {})) {
+			ctx.response.header(name, value);
+		}
+		applySecurityHeaders(ctx, bh);
+		// Two-step: `.status(...).json(...)` chaining relies on a self-typed
+		// return the structural interface can't express. Splitting is equivalent.
+		ctx.response.status(outcome.status);
+		ctx.response.json(outcome.body);
+		return true;
+	}
+	if (outcome.varyOrigin) appendVary(ctx, "Origin");
+	if (outcome.kind === "preflight") {
+		for (const [name, value] of Object.entries(outcome.headers)) {
+			ctx.response.header(name, value);
+		}
+		applySecurityHeaders(ctx, bh);
+		ctx.response.status(outcome.status);
+		ctx.response.send("");
+		return true;
+	}
+	for (const [name, value] of Object.entries(outcome.corsHeaders)) {
+		ctx.response.header(name, value);
+	}
+	// Success-path X-RateLimit-* from the in-process limiter (store path already
+	// set them above). Parity with @adonisjs/limiter (budget on every response).
+	for (const [name, value] of Object.entries(outcome.rateLimitHeaders ?? {})) {
+		ctx.response.header(name, value);
+	}
+	applySecurityHeaders(ctx, bh);
+	return false;
+}
+
+/** The engine's view of a Ream request. */
+function coreRequest(ctx: ReamContext, remoteAddr: string): CoreRequest {
+	return {
 		method: ctx.request.method(),
 		path: ctx.request.path(),
 		url: ctx.request.url(true),
@@ -174,45 +252,55 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 		// as an object — the raw urlencoded string the engine would scan for
 		// `_csrf` no longer exists. Rebuild the field, as the other adapters do.
 		body: csrfBodyString(ctx.request.body()),
-		remoteAddr: rateLimitKey,
+		remoteAddr,
+		protocol: ctx.request.protocol?.(),
 	};
-	const outcome = runRequestPhase(bh, req);
+}
 
+/**
+ * The server-tier half: the rate limit, the shield and CORS, for every
+ * request — a route that does not exist included, whose 404 is raised before
+ * any router middleware runs. The rate limit waits for the router-tier half
+ * when `rateLimit.keyFor` is set: it may read what a router middleware sets,
+ * such as the authenticated user.
+ */
+export async function blackholeServerMiddleware(
+	ctx: ReamContext,
+	next: ReamNext,
+): Promise<void> {
+	const bh = await resolveBlackhole(ctx);
+	const checks: EngineCheck[] = bh.rateLimitKeyedByRequest()
+		? ["shield"]
+		: ["rateLimit", "shield"];
+	if (await guard(ctx, bh, checks)) return;
+	guardedByServer.add(ctx);
+	await next();
+}
+
+export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
+	const bh = await resolveBlackhole(ctx);
+
+	// Alone, this middleware runs every check. After the server-tier one, only
+	// what that one left: CSRF, and the rate limit when it is keyed per request.
+	const afterServer = guardedByServer.has(ctx);
+	const countHere = !afterServer || bh.rateLimitKeyedByRequest();
+	if (!afterServer) {
+		if (await guard(ctx, bh, ["rateLimit", "shield"])) return;
+	} else if (countHere) {
+		if (await guard(ctx, bh, ["rateLimit"])) return;
+	}
+
+	const outcome = runCsrfPhase(bh, coreRequest(ctx, ""));
 	if (outcome.kind === "reject") {
-		// Rate-limit rejections carry Retry-After / X-RateLimit-* so clients back off.
-		for (const [name, value] of Object.entries(outcome.headers ?? {})) {
-			ctx.response.header(name, value);
-		}
+		applySecurityHeaders(ctx, bh);
 		if (handleCsrfRejectionForBrowser(ctx, outcome.body)) return;
-		// Two-step: `.status(...).json(...)` chaining relies on a self-typed
-		// return the structural interface can't express. Splitting is equivalent.
 		ctx.response.status(outcome.status);
 		ctx.response.json(outcome.body);
 		return;
 	}
-	if (outcome.kind === "preflight") {
-		if (outcome.varyOrigin) appendVary(ctx, "Origin");
-		for (const [name, value] of Object.entries(outcome.headers)) {
-			ctx.response.header(name, value);
-		}
-		ctx.response.status(outcome.status);
-		ctx.response.send("");
-		return;
-	}
 
-	// Pass: apply CORS headers, seed the CSRF token (both `request.csrfToken`
-	// and `ctx.store` for templating), the XSRF-TOKEN cookie, and the CSP nonce.
-	if (outcome.varyOrigin) appendVary(ctx, "Origin");
-	for (const [name, value] of Object.entries(outcome.corsHeaders)) {
-		ctx.response.header(name, value);
-	}
-	// Success-path X-RateLimit-* from the in-process limiter (store path already
-	// set them above). Parity with @adonisjs/limiter (budget on every response).
-	if (outcome.rateLimitHeaders) {
-		for (const [name, value] of Object.entries(outcome.rateLimitHeaders)) {
-			ctx.response.header(name, value);
-		}
-	}
+	// Pass: seed the CSRF token (both `request.csrfToken` and `ctx.store` for
+	// templating), the XSRF-TOKEN cookie, and the CSP nonce.
 	ctx.request.csrfToken = outcome.csrfToken;
 	ctx.store.set("csrfToken", outcome.csrfToken);
 	// The enforce signal (fail-close), distinct from the seeded token above: `true`
@@ -244,6 +332,8 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 			share.call(view, { cspNonce: outcome.cspNonce });
 		}
 	}
+
+	applySecurityHeaders(ctx, bh, outcome.cspNonce);
 
 	await next();
 

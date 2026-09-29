@@ -1,10 +1,10 @@
-//! Crypto utilities — HMAC-SHA256 sign/verify + random bytes/hex.
+//! Crypto utilities — HMAC-SHA256 sign/verify.
 //!
 //! NOTE: AES-GCM and scrypt are NOT implemented here (an earlier doc claimed
 //! them). `hmac_sign` / `hmac_verify` ARE load-bearing: they sign and verify
 //! every CSRF token (see `csrf.rs`), so their output is a compatibility
-//! surface, not an internal detail. `random_bytes` / `random_hex` have no
-//! caller yet — CSRF mints its own randomness straight from `getrandom`.
+//! surface, not an internal detail. CSRF mints its randomness straight from
+//! `getrandom` (see `csrf.rs`).
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use hmac::{Hmac, KeyInit, Mac};
@@ -31,20 +31,6 @@ pub fn hmac_verify(data: &str, signature: &str, secret: &[u8]) -> Result<bool, S
     Ok(mac.verify_slice(&sig_bytes).is_ok())
 }
 
-/// Generate cryptographically secure random bytes, returned as base64url.
-pub fn random_bytes(len: usize) -> Result<String, String> {
-    let mut buf = vec![0u8; len];
-    rand::RngExt::fill(&mut rand::rng(), &mut buf[..]);
-    Ok(URL_SAFE_NO_PAD.encode(&buf))
-}
-
-/// Generate random bytes as hex string.
-pub fn random_hex(len: usize) -> Result<String, String> {
-    let mut buf = vec![0u8; len];
-    rand::RngExt::fill(&mut rand::rng(), &mut buf[..]);
-    Ok(buf.iter().map(|b| format!("{:02x}", b)).collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,20 +41,6 @@ mod tests {
         let sig = hmac_sign("hello world", secret).unwrap();
         assert!(hmac_verify("hello world", &sig, secret).unwrap());
         assert!(!hmac_verify("tampered", &sig, secret).unwrap());
-    }
-
-    #[test]
-    fn test_random_bytes() {
-        let a = random_bytes(32).unwrap();
-        let b = random_bytes(32).unwrap();
-        assert_ne!(a, b);
-        assert!(a.len() > 30); // base64url of 32 bytes
-    }
-
-    #[test]
-    fn test_random_hex() {
-        let hex = random_hex(16).unwrap();
-        assert_eq!(hex.len(), 32); // 16 bytes = 32 hex chars
     }
 }
 
@@ -93,31 +65,6 @@ mod rfc4231 {
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>(),
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
-        );
-    }
-}
-
-#[cfg(test)]
-mod entropy {
-    use super::*;
-    use std::collections::HashSet;
-
-    /// A CSPRNG swapped for something that is not one is the failure this
-    /// guards: a stub returning zeros, or a seeded RNG producing the same
-    /// token every call, would pass every other test in this crate. These
-    /// bytes become session identifiers and CSRF tokens.
-    #[test]
-    fn random_bytes_are_neither_constant_nor_repeated() {
-        let seen: HashSet<String> = (0..64)
-            .map(|_| random_bytes(32).expect("generates"))
-            .collect();
-        assert_eq!(seen.len(), 64, "the generator repeated itself");
-
-        let hex = random_hex(32).expect("generates");
-        assert_eq!(hex.len(), 64);
-        assert!(
-            hex.chars().any(|c| c != '0'),
-            "the generator produced all zeroes"
         );
     }
 }

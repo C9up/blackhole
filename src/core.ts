@@ -6,7 +6,7 @@
  * duplicating the CORS → check → CSRF → headers → sanitize pipeline.
  */
 
-import type { Blackhole } from "./index.js";
+import type { Blackhole, CheckResult, EngineCheck } from "./index.js";
 
 /** Framework-agnostic view of an incoming request. */
 export interface CoreRequest {
@@ -17,47 +17,71 @@ export interface CoreRequest {
 	headers: Readonly<Record<string, string>>;
 	body: string | undefined;
 	remoteAddr: string;
+	/**
+	 * `http` or `https`, as the host resolved it (trusted-proxy aware). The CSRF
+	 * origin check compares it with the Origin's scheme; without it, hosts only.
+	 */
+	protocol?: string;
 }
+
+/** A refusal: the adapter answers with it and stops. */
+export interface RejectOutcome {
+	kind: "reject";
+	status: number;
+	body: unknown;
+	/** Extra headers to set on the rejection (e.g. `Retry-After` on a 429). */
+	headers?: Record<string, string>;
+}
+
+/** A CORS preflight, answered without reaching the route. */
+export interface PreflightOutcome {
+	kind: "preflight";
+	status: number;
+	headers: Record<string, string>;
+	varyOrigin: boolean;
+}
+
+/** What the guard phase lets through, with the headers it owes the response. */
+export interface GuardPass {
+	kind: "pass";
+	corsHeaders: Record<string, string>;
+	varyOrigin: boolean;
+	/**
+	 * `X-RateLimit-*` headers to set on the SUCCESS response (parity with
+	 * `@adonisjs/limiter`, which reports the budget on every response).
+	 * Present only when the in-process limiter ran.
+	 */
+	rateLimitHeaders?: Record<string, string>;
+}
+
+/** What the CSRF phase lets through: the token to publish, and the nonce. */
+export interface CsrfPass {
+	kind: "pass";
+	csrfToken: string;
+	/**
+	 * `true` only when CSRF was enforced+validated for this request (not
+	 * merely that a token was seeded). Consumers fail-close on this.
+	 */
+	csrfProtected: boolean;
+	/** Present only when a fresh cookie must be set (none was sent). */
+	setCookie?: {
+		name: string;
+		value: string;
+		options: Record<string, unknown>;
+	};
+	cspNonce?: string;
+	/** Present when the rate limit was counted in this phase. */
+	rateLimitHeaders?: Record<string, string>;
+}
+
+export type GuardOutcome = RejectOutcome | PreflightOutcome | GuardPass;
+export type CsrfOutcome = RejectOutcome | CsrfPass;
 
 /** Result of the request phase; the adapter applies it to its response/request. */
 export type RequestOutcome =
-	| {
-			kind: "reject";
-			status: number;
-			body: unknown;
-			/** Extra headers to set on the rejection (e.g. `Retry-After` on a 429). */
-			headers?: Record<string, string>;
-	  }
-	| {
-			kind: "preflight";
-			status: number;
-			headers: Record<string, string>;
-			varyOrigin: boolean;
-	  }
-	| {
-			kind: "pass";
-			corsHeaders: Record<string, string>;
-			varyOrigin: boolean;
-			csrfToken: string;
-			/**
-			 * `true` only when CSRF was enforced+validated for this request (not
-			 * merely that a token was seeded). Consumers fail-close on this.
-			 */
-			csrfProtected: boolean;
-			/** Present only when a fresh cookie must be set (none was sent). */
-			setCookie?: {
-				name: string;
-				value: string;
-				options: Record<string, unknown>;
-			};
-			cspNonce?: string;
-			/**
-			 * `X-RateLimit-*` headers to set on the SUCCESS response (parity with
-			 * `@adonisjs/limiter`, which reports the budget on every response).
-			 * Present only when the in-process limiter is active.
-			 */
-			rateLimitHeaders?: Record<string, string>;
-	  };
+	| RejectOutcome
+	| PreflightOutcome
+	| (CsrfPass & Omit<GuardPass, "kind">);
 
 /**
  * Build `X-RateLimit-*` headers from a rate-limit outcome. `X-RateLimit-Reset`
@@ -114,7 +138,7 @@ export function csrfBodyString(body: unknown): string | undefined {
 }
 
 /** Safe JSON parse — returns a fallback error envelope if body is not valid JSON. */
-export function safeJsonParse(body: string | undefined): unknown {
+function safeJsonParse(body: string | undefined): unknown {
 	if (!body)
 		return {
 			error: { code: "E_BLACKHOLE_BLOCKED", message: "Request rejected" },
@@ -127,7 +151,7 @@ export function safeJsonParse(body: string | undefined): unknown {
 }
 
 /** Safe URL → search string (`?a=1`). Never throws on malformed input. */
-export function safeQuery(url: string): string {
+function safeQuery(url: string): string {
 	try {
 		return new URL(url, "http://localhost").search;
 	} catch {
@@ -197,15 +221,45 @@ function readCookie(cookieHeader: string, name: string): string | undefined {
 	return cookieHeader.match(new RegExp(`(?:^|;\\s*)${escaped}=([^;]+)`))?.[1];
 }
 
-/**
- * Request-phase security: CORS (incl. preflight short-circuit), the Rust filter
- * check, the CSRF double-submit token, and the CSP nonce. Returns a
- * framework-agnostic outcome — no side effects.
- */
-export function runRequestPhase(
+/** Ask the engine for `checks` only, and turn a refusal into an outcome. */
+function engineCheck(
 	bh: Blackhole,
 	req: CoreRequest,
-): RequestOutcome {
+	checks: EngineCheck[],
+): { reject?: RejectOutcome; result: CheckResult } {
+	const result = bh.check({
+		method: req.method,
+		path: req.path,
+		query: safeQuery(req.url),
+		headers: req.headers,
+		body: req.body,
+		remoteAddr: req.remoteAddr,
+		protocol: req.protocol,
+		checks,
+	});
+	if (result.allowed) return { result };
+	return {
+		result,
+		reject: {
+			kind: "reject",
+			status: result.status ?? 500,
+			body: safeJsonParse(result.body),
+			headers: withIsoReset(result.headers),
+		},
+	};
+}
+
+/**
+ * The guards that need neither a route nor a parsed body: CORS (answering a
+ * preflight), then the engine `checks` given — the rate limit and the shield
+ * (path traversal, parameter pollution). What a host runs where every request
+ * passes, unmatched routes included. No side effects.
+ */
+export function runGuardPhase(
+	bh: Blackhole,
+	req: CoreRequest,
+	checks: EngineCheck[],
+): GuardOutcome {
 	const cors = bh.cors(
 		req.headers.origin ?? "",
 		req.method,
@@ -217,67 +271,80 @@ export function runRequestPhase(
 	if (cors?.preflight) {
 		return { kind: "preflight", status: 204, headers: corsHeaders, varyOrigin };
 	}
-
-	// A predicate `exceptRoutes` runs before the engine: a function cannot cross
-	// the NAPI boundary, so the exemption is decided here.
-	if (bh.csrfExempt({ method: req.method, path: req.path })) {
-		const { name, options } = bh.csrfCookie();
-		const existing = usableCsrfToken(bh, req);
-		const csrfToken = existing ?? bh.generateCsrfToken();
-		return {
-			kind: "pass",
-			corsHeaders,
-			varyOrigin,
-			csrfToken,
-			csrfProtected: false,
-			// Exemption skips VERIFICATION, not the cookie: a page served from
-			// an exempt route still hands the client a token, and the next
-			// protected request has to have somewhere to double-submit it from.
-			setCookie:
-				existing || !bh.xsrfCookieEnabled()
-					? undefined
-					: { name, value: csrfToken, options },
-			cspNonce: bh.cspHasNonce() ? bh.generateNonce() : undefined,
-		};
-	}
-
-	const result = bh.check({
-		method: req.method,
-		path: req.path,
-		query: safeQuery(req.url),
-		headers: req.headers,
-		body: req.body,
-		remoteAddr: req.remoteAddr,
-	});
-	if (!result.allowed) {
-		return {
-			kind: "reject",
-			status: result.status ?? 500,
-			body: safeJsonParse(result.body),
-			headers: withIsoReset(result.headers),
-		};
-	}
-
-	const { name, options } = bh.csrfCookie();
-	const existing = usableCsrfToken(bh, req);
-	const csrfToken = existing ?? bh.generateCsrfToken();
-	const cspNonce = bh.cspHasNonce() ? bh.generateNonce() : undefined;
+	if (checks.length === 0) return { kind: "pass", corsHeaders, varyOrigin };
+	const { reject, result } = engineCheck(bh, req, checks);
+	if (reject) return reject;
 	return {
 		kind: "pass",
 		corsHeaders,
 		varyOrigin,
+		rateLimitHeaders: result.rateLimit
+			? rateLimitHeaders(result.rateLimit)
+			: undefined,
+	};
+}
+
+/**
+ * The CSRF double-submit token and the CSP nonce — and the rate limit too when
+ * `rateLimit` is set, for a host whose counting key needs what the earlier
+ * middlewares set. No side effects.
+ */
+export function runCsrfPhase(
+	bh: Blackhole,
+	req: CoreRequest,
+	rateLimit = false,
+): CsrfOutcome {
+	const { name, options } = bh.csrfCookie();
+	const existing = usableCsrfToken(bh, req);
+	// A predicate `exceptRoutes` runs before the engine: a function cannot cross
+	// the NAPI boundary, so the exemption is decided here. It exempts from CSRF
+	// only — the rate limit still counts the request.
+	const exempt = bh.csrfExempt({ method: req.method, path: req.path });
+	const checks: EngineCheck[] = exempt ? [] : ["csrf"];
+	if (rateLimit) checks.unshift("rateLimit");
+	let result: CheckResult | undefined;
+	if (checks.length > 0) {
+		const checked = engineCheck(bh, req, checks);
+		if (checked.reject) return checked.reject;
+		result = checked.result;
+	}
+	const csrfToken = existing ?? bh.generateCsrfToken();
+	return {
+		kind: "pass",
 		csrfToken,
-		csrfProtected: result.csrfEnforced ?? false,
+		csrfProtected: exempt ? false : (result?.csrfEnforced ?? false),
 		// Not seeded when the app turned the readable cookie off: an all-SSR app
-		// sends the token in the `_csrf` field and has no use for it.
+		// sends the token in the `_csrf` field and has no use for it. Exemption
+		// skips VERIFICATION, not the cookie: a page served from an exempt route
+		// still hands the client a token for its next protected request.
 		setCookie:
 			existing || !bh.xsrfCookieEnabled()
 				? undefined
 				: { name, value: csrfToken, options },
-		cspNonce,
-		rateLimitHeaders: result.rateLimit
+		cspNonce: bh.cspHasNonce() ? bh.generateNonce() : undefined,
+		rateLimitHeaders: result?.rateLimit
 			? rateLimitHeaders(result.rateLimit)
 			: undefined,
+	};
+}
+
+/**
+ * Request-phase security in one middleware: the guard phase, then the CSRF
+ * phase. Returns a framework-agnostic outcome — no side effects.
+ */
+export function runRequestPhase(
+	bh: Blackhole,
+	req: CoreRequest,
+): RequestOutcome {
+	const guarded = runGuardPhase(bh, req, ["rateLimit", "shield"]);
+	if (guarded.kind !== "pass") return guarded;
+	const csrf = runCsrfPhase(bh, req);
+	if (csrf.kind === "reject") return csrf;
+	return {
+		...csrf,
+		corsHeaders: guarded.corsHeaders,
+		varyOrigin: guarded.varyOrigin,
+		rateLimitHeaders: guarded.rateLimitHeaders,
 	};
 }
 

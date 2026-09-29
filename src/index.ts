@@ -21,6 +21,12 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { loadNativeBinary } from "./vendor/nativeBinary.js";
 import { inProduction } from "./vendor/nodeEnv.js";
 
+/**
+ * One of the engine's checks: the rate limit, the shield (path traversal and
+ * parameter pollution), or CSRF (Origin and token).
+ */
+export type EngineCheck = "rateLimit" | "shield" | "csrf";
+
 /** Rate-limit numbers the engine reports for `X-RateLimit-*` headers. */
 export interface RateLimitMeta {
 	/** Configured ceiling (`max`). */
@@ -587,6 +593,13 @@ export interface Blackhole {
 		headers: Readonly<Record<string, string>>;
 		body?: string;
 		remoteAddr?: string;
+		/** `http` or `https`: the Origin must match it on a CSRF-guarded request. */
+		protocol?: string;
+		/**
+		 * Run only these checks — for a host that splits the pipeline across
+		 * two middlewares. All of them when omitted.
+		 */
+		checks?: EngineCheck[];
 	}): CheckResult;
 	/** Generate a new CSRF token. */
 	generateCsrfToken(): string;
@@ -628,6 +641,12 @@ export interface Blackhole {
 	 * client IP by default (parity with limiter's `usingKey`).
 	 */
 	rateLimitKey(ctx: RateLimitContext): string;
+	/**
+	 * Whether the counting key comes from `rateLimit.keyFor(ctx)` — which may
+	 * read what a later middleware sets (the authenticated user), so the limit
+	 * cannot be taken before it.
+	 */
+	rateLimitKeyedByRequest(): boolean;
 	/** Is a distributed {@link RateLimitStore} configured (JS counts, Rust skips)? */
 	hasRateLimitStore(): boolean;
 	/**
@@ -662,6 +681,29 @@ const PUBLICLY_KNOWN_SECRETS = new Set([
  * can be forged by anyone who has read it, which is the same as not signing at
  * all — and worse, because the code says it is signed.
  */
+/**
+ * Refuse a limit that would not limit. The engine takes unsigned integers, so
+ * a fraction was truncated (`windowSeconds: 0.5` became 0), a negative wrapped,
+ * and a window of 0 expired every hit at once: all three let every request
+ * through, silently.
+ */
+function assertRateLimit(rateLimit: {
+	max: number;
+	windowSeconds: number;
+}): void {
+	const fields: Array<[string, number]> = [
+		["max", rateLimit.max],
+		["windowSeconds", rateLimit.windowSeconds],
+	];
+	for (const [field, value] of fields) {
+		if (!Number.isSafeInteger(value) || value <= 0 || value > 0xffffffff) {
+			throw new Error(
+				`[blackhole] rateLimit.${field} must be a positive whole number, got ${String(value)}.`,
+			);
+		}
+	}
+}
+
 function assertUsableSecret(secret: string): void {
 	if (PUBLICLY_KNOWN_SECRETS.has(secret.trim().toLowerCase())) {
 		throw new Error(
@@ -775,6 +817,7 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 	if (csrf.enabled && options.secret) {
 		assertUsableSecret(options.secret);
 	}
+	if (options.rateLimit !== undefined) assertRateLimit(options.rateLimit);
 	// A distributed store moves counting + the 429 decision into JS (see
 	// `checkRateLimit`), so the in-process Rust counter must NOT also run — pass
 	// no max/window to the engine when a store is configured.
@@ -814,6 +857,8 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 				headersJson,
 				req.body ?? "",
 				req.remoteAddr ?? "",
+				req.protocol,
+				req.checks,
 			);
 		},
 		generateCsrfToken() {
@@ -872,6 +917,9 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		},
 		rateLimitKey(ctx) {
 			return rateLimit?.keyFor?.(ctx) ?? ctx.request.ip();
+		},
+		rateLimitKeyedByRequest() {
+			return rateLimit?.keyFor !== undefined;
 		},
 		hasRateLimitStore() {
 			return rateLimit?.store !== undefined;

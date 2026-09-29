@@ -51,7 +51,9 @@ pub fn first_duplicate_key(query: &str) -> Option<String> {
     if query.is_empty() {
         return None;
     }
-    let mut seen: Vec<String> = Vec::new();
+    // A set, not a list: a linear search per key made a query of n distinct
+    // keys cost n² comparisons — 10 000 keys held the request thread ~50 ms.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for pair in query.split('&') {
         let raw_key = pair.split('=').next().unwrap_or("");
         if raw_key.is_empty() {
@@ -64,10 +66,10 @@ pub fn first_duplicate_key(query: &str) -> Option<String> {
         if key.ends_with("[]") {
             continue;
         }
-        if seen.iter().any(|k| k == &key) {
+        if seen.contains(&key) {
             return Some(key);
         }
-        seen.push(key);
+        seen.insert(key);
     }
     None
 }
@@ -75,6 +77,23 @@ pub fn first_duplicate_key(query: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn many_distinct_keys_stay_linear() {
+        let query: String = (0..10_000)
+            .map(|i| format!("k{i}=1"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let started = std::time::Instant::now();
+        assert_eq!(first_duplicate_key(&query), None);
+        // Quadratic took ~50 ms in release; linear is well under a millisecond.
+        // The bound leaves room for a debug build on a slow CI runner.
+        assert!(started.elapsed() < std::time::Duration::from_millis(40));
+        assert_eq!(
+            first_duplicate_key(&format!("{query}&k9999=2")),
+            Some("k9999".to_string())
+        );
+    }
 
     #[test]
     fn detects_literal_traversal() {

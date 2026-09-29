@@ -24,6 +24,10 @@
       "types": "./src/middleware.ts",
       "import": "./src/middleware.ts"
     },
+    "./server_middleware": {
+      "types": "./src/server_middleware.ts",
+      "import": "./src/server_middleware.ts"
+    },
     "./provider": {
       "types": "./src/BlackholeProvider.ts",
       "import": "./src/BlackholeProvider.ts"
@@ -43,6 +47,10 @@
     "./fastify": {
       "types": "./src/fastify.ts",
       "import": "./src/fastify.ts"
+    },
+    "./hono": {
+      "types": "./src/hono.ts",
+      "import": "./src/hono.ts"
     }
   },
   "scripts": {
@@ -59,7 +67,8 @@
   },
   "peerDependencies": {
     "@c9up/quasar": "^0.1.0 || ^0.2.0",
-    "@c9up/ream": "^0.2.26"
+    "@c9up/ream": "^0.2.26",
+    "hono": "^4.0.0"
   },
   "peerDependenciesMeta": {
     "@c9up/quasar": {
@@ -67,12 +76,16 @@
     },
     "@c9up/ream": {
       "optional": true
+    },
+    "hono": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",
     "@types/node": "^22.20.1",
     "@vitest/coverage-v8": "4.1.11",
+    "hono": "^4.13.10",
     "typescript": "^6.0.3",
     "vitest": "4.1.11"
   },
@@ -91,6 +104,10 @@
       "./middleware": {
         "types": "./dist/middleware.d.ts",
         "import": "./dist/middleware.js"
+      },
+      "./server_middleware": {
+        "types": "./dist/server_middleware.d.ts",
+        "import": "./dist/server_middleware.js"
       },
       "./provider": {
         "types": "./dist/BlackholeProvider.d.ts",
@@ -111,6 +128,10 @@
       "./fastify": {
         "types": "./dist/fastify.d.ts",
         "import": "./dist/fastify.js"
+      },
+      "./hono": {
+        "types": "./dist/hono.d.ts",
+        "import": "./dist/hono.js"
       }
     },
     "access": "public"

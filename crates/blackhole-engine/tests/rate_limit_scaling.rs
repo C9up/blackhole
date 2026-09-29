@@ -20,12 +20,12 @@ fn cost_per_new_key(population: usize, probes: u32) -> Duration {
     // this measures bookkeeping, not the decision.
     let limiter = RateLimiter::new(1_000_000, 3_600);
     for i in 0..population {
-        limiter.check(&format!("filler-{i}"));
+        limiter.check_detailed(&format!("filler-{i}"));
     }
 
     let start = Instant::now();
     for i in 0..probes {
-        limiter.check(&format!("probe-{i}"));
+        limiter.check_detailed(&format!("probe-{i}"));
     }
     start.elapsed() / probes
 }
@@ -49,7 +49,7 @@ fn still_refuses_once_the_limit_is_reached() {
     // own bucket is always pruned before the decision, however long ago the
     // last full sweep ran.
     let limiter = RateLimiter::new(2, 60);
-    assert!(limiter.check("client"));
-    assert!(limiter.check("client"));
-    assert!(!limiter.check("client"));
+    assert!(limiter.check_detailed("client").allowed);
+    assert!(limiter.check_detailed("client").allowed);
+    assert!(!limiter.check_detailed("client").allowed);
 }

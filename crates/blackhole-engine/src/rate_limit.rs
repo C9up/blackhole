@@ -112,11 +112,6 @@ impl RateLimiter {
         }
     }
 
-    /// Check if a request from the given key is allowed (bool convenience).
-    pub fn check(&self, key: &str) -> bool {
-        self.check_detailed(key).allowed
-    }
-
     /// Check a request and return the full outcome (limit / remaining / retry-after).
     pub fn check_detailed(&self, key: &str) -> RateLimitOutcome {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -196,33 +191,33 @@ mod tests {
     #[test]
     fn allows_within_limit() {
         let limiter = RateLimiter::new(3, 60);
-        assert!(limiter.check("ip1"));
-        assert!(limiter.check("ip1"));
-        assert!(limiter.check("ip1"));
+        assert!(limiter.check_detailed("ip1").allowed);
+        assert!(limiter.check_detailed("ip1").allowed);
+        assert!(limiter.check_detailed("ip1").allowed);
     }
 
     #[test]
     fn blocks_over_limit() {
         let limiter = RateLimiter::new(2, 60);
-        assert!(limiter.check("ip1"));
-        assert!(limiter.check("ip1"));
-        assert!(!limiter.check("ip1"));
+        assert!(limiter.check_detailed("ip1").allowed);
+        assert!(limiter.check_detailed("ip1").allowed);
+        assert!(!limiter.check_detailed("ip1").allowed);
     }
 
     #[test]
     fn separate_keys() {
         let limiter = RateLimiter::new(1, 60);
-        assert!(limiter.check("ip1"));
-        assert!(limiter.check("ip2"));
-        assert!(!limiter.check("ip1"));
+        assert!(limiter.check_detailed("ip1").allowed);
+        assert!(limiter.check_detailed("ip2").allowed);
+        assert!(!limiter.check_detailed("ip1").allowed);
     }
 
     #[test]
     fn remaining_count() {
         let limiter = RateLimiter::new(5, 60);
         assert_eq!(limiter.remaining("ip1"), 5);
-        limiter.check("ip1");
-        limiter.check("ip1");
+        limiter.check_detailed("ip1");
+        limiter.check_detailed("ip1");
         assert_eq!(limiter.remaining("ip1"), 3);
     }
 
@@ -233,7 +228,7 @@ mod tests {
         assert!(first.allowed);
         assert_eq!(first.limit, 2);
         assert_eq!(first.remaining, 1);
-        limiter.check("ip1"); // exhaust
+        limiter.check_detailed("ip1"); // exhaust
         let blocked = limiter.check_detailed("ip1");
         assert!(!blocked.allowed);
         assert_eq!(blocked.remaining, 0);

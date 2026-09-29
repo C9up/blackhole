@@ -36,9 +36,12 @@ interface Codemods {
 export async function configure(codemods: Codemods): Promise<void> {
 	await codemods.addProvider("@c9up/blackhole/provider");
 
-	// Router tier, not server: the XSS filter reads `request.body()`, so it has
-	// to run after the body parser. On the server tier it would inspect a body
-	// that has not been parsed yet.
+	// Two halves. The server tier sees every request, a 404 included: rate
+	// limit, shield, CORS, protective headers. The CSRF check reads the parsed
+	// body, so it runs on the router tier, after the body parser.
+	await codemods.registerMiddleware("@c9up/blackhole/server_middleware", {
+		tier: "server",
+	});
 	await codemods.registerMiddleware("@c9up/blackhole/middleware", {
 		tier: "router",
 	});

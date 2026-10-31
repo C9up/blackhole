@@ -125,15 +125,21 @@ function isBlackhole(value: unknown): value is Blackhole {
  * out to be. Set on the refusals too — a 403 or a 429 is still a page a
  * browser renders — and before the handler runs, so a response the exception
  * handler builds after a throw carries them as well.
+ *
+ * The set also goes in the request store (`securityHeaders`): a view layer
+ * with headers of its own (photon) reads there that this set was decided, so
+ * a header left out (`frameOptions: false`) is not one it should add back.
  */
 function applySecurityHeaders(
 	ctx: ReamContext,
 	bh: Blackhole,
 	nonce?: string,
 ): void {
-	for (const [name, value] of Object.entries(bh.securityHeaders(nonce))) {
+	const headers = bh.securityHeaders(nonce);
+	for (const [name, value] of Object.entries(headers)) {
 		ctx.response.header(name, value);
 	}
+	ctx.store.set("securityHeaders", headers);
 }
 
 /** Append `value` to the context's `Vary` header (dedup, via the shared helper). */

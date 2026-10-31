@@ -114,6 +114,19 @@ describe("blackhole > blackholeMiddleware (Ream)", () => {
 		expect(nextCalled).toBe(true);
 	});
 
+	it("says in the store which protective headers it decided", async () => {
+		// A view layer reads this to tell "left out on purpose" from "absent".
+		const { ctx, spy } = makeReamContext({});
+		await blackholeMiddleware(ctx, () => {});
+		const decided = spy.store.securityHeaders;
+		expect(decided).toEqual(
+			expect.objectContaining({ "x-frame-options": "SAMEORIGIN" }),
+		);
+		expect(Object.keys(spy.header ?? {})).toEqual(
+			expect.arrayContaining(Object.keys(decided as object)),
+		);
+	});
+
 	it("sanitizes a text/html response body via Blackhole.sanitizeResponse()", async () => {
 		const { ctx } = makeReamContext({
 			bodyOut: "<script>x</script><p>safe</p>",

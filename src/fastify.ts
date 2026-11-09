@@ -16,6 +16,7 @@ import {
 	type CoreRequest,
 	csrfBodyString,
 	rateLimitHeaders,
+	rawPathOf,
 	runRequestPhase,
 	runResponsePhase,
 	serializeCookie,
@@ -29,8 +30,17 @@ import {
 /** Structural subset of a Fastify request the adapter reads. */
 interface FastifyRequest {
 	method: string;
+	/** The request target as received — path and query, nothing resolved. */
 	url: string;
+	raw?: { url?: string };
+	/** The matched route's pattern (Fastify 4). */
 	routerPath?: string;
+	/** The matched route's options; `url` is its pattern (Fastify ≥ 4.10). */
+	routeOptions?: { url?: string };
+	/** `host[:port]`, honouring `trustProxy` (Fastify 5). */
+	host?: string;
+	/** `host[:port]` on Fastify 4, the name alone on Fastify 5. */
+	hostname?: string;
 	headers: Record<string, string | string[] | undefined>;
 	body?: unknown;
 	ip?: string;
@@ -126,12 +136,19 @@ export function blackholeFastify(options: BlackholeOptions = {}) {
 				}
 			}
 
+			const target = request.raw?.url ?? request.url;
 			const coreReq: CoreRequest = {
 				method: request.method,
-				path:
-					request.routerPath ??
-					new URL(request.url, "http://localhost").pathname,
-				url: request.url,
+				// The path as the client sent it. Not `routerPath` — that is the
+				// route PATTERN (`/files/*`), which never holds a `..` — and not
+				// `new URL().pathname`, which resolves `..` and `%2e%2e` away
+				// before the traversal guard could see them.
+				path: rawPathOf(target),
+				url: target,
+				// Fastify 5 names the host with its port `host`; Fastify 4 named
+				// it `hostname`. Either honours `trustProxy`.
+				host: request.host ?? request.hostname,
+				routePattern: request.routeOptions?.url ?? request.routerPath,
 				headers: flattenHeaders(request.headers),
 				body: csrfBodyString(request.body),
 				remoteAddr: rateLimitKey,
@@ -192,8 +209,10 @@ export function blackholeFastify(options: BlackholeOptions = {}) {
 				contentType: typeof ct === "string" ? ct : "",
 				cspNonce: reply.nonce,
 			});
+			// Only where the route did not set its own: a page that must be
+			// framed by a partner, or carries a CSP of its own, keeps it.
 			for (const [name, value] of Object.entries(headers)) {
-				reply.header(name, value);
+				if (reply.getHeader(name) === undefined) reply.header(name, value);
 			}
 			return typeof payload === "string" ? body : payload;
 		});

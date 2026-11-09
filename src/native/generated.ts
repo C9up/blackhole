@@ -16,8 +16,14 @@ export declare class Blackhole {
 		csrfMethods?: Array<string> | undefined | null,
 		csrfSecret?: string | undefined | null,
 		csrfTrustedOrigins?: Array<string> | undefined | null,
+		xssAllowAttributes?: Array<string> | undefined | null,
 	);
-	generateCsrfToken(): string;
+	/**
+	 * A fresh CSRF token. With a `binding` (the session's secret), its
+	 * signature covers that too, and it verifies only when `check` is given
+	 * the same binding.
+	 */
+	generateCsrfToken(binding?: string | undefined | null): string;
 	/**
 	 * Check a request. Returns `{ allowed: true, request }` or `{ allowed: false, status, body }`.
 	 *
@@ -36,6 +42,8 @@ export declare class Blackhole {
 		remoteAddr: string,
 		scheme?: string | undefined | null,
 		checks?: Array<string> | undefined | null,
+		host?: string | undefined | null,
+		csrfBinding?: string | undefined | null,
 	): {
 		allowed: boolean;
 		status?: number;

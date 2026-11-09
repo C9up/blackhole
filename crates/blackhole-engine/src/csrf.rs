@@ -10,11 +10,14 @@
 //! secret. A plain (unsigned) double-submit would accept any self-consistent
 //! pair — this one does not.
 //!
-//! The signature alone does NOT bind the token to a user, so it does not by
-//! itself stop an attacker who plants a token they were *legitimately* issued
-//! (sibling-subdomain `Set-Cookie` / MITM on an http subdomain). That gap is
-//! closed by [`CsrfValidator::verify_origin`] — a same-origin `Origin`/`Referer`
-//! check on unsafe verbs, applied before the token check.
+//! A host with sessions passes a per-session secret as the token's *binding*
+//! ([`CsrfValidator::generate_bound_token`] / [`CsrfValidator::validate_bound`]):
+//! the signature then covers it, and a token issued to one session is refused
+//! for every other. Without one, the token binds to nothing, and an attacker
+//! who plants a token they were *legitimately* issued (sibling-subdomain
+//! `Set-Cookie` / MITM on an http subdomain) is stopped by
+//! [`CsrfValidator::verify_origin`] — a same-origin `Origin`/`Referer` check on
+//! unsafe verbs, applied before the token check.
 //!
 //! Because validation is still purely cryptographic on values the request
 //! carries, it scales horizontally with **no shared store** — every instance
@@ -104,9 +107,18 @@ impl CsrfValidator {
     /// Panics if the OS entropy source is unavailable — a non-crypto fallback is
     /// worse than a clear failure because it creates a false sense of security.
     pub fn generate_token(&self) -> String {
+        self.generate_bound_token("")
+    }
+
+    /// Like [`generate_token`](Self::generate_token), with the signature also
+    /// covering `binding` — a secret the host keeps per session. Such a token
+    /// verifies only when the same binding is presented again, so one issued
+    /// to another session (or leaked from it) is refused here. An empty
+    /// binding is the unbound token.
+    pub fn generate_bound_token(&self, binding: &str) -> String {
         let random = generate_crypto_random_hex(32)
             .expect("[blackhole] FATAL: getrandom failed — cannot generate CSRF token. OS entropy source is unavailable.");
-        let sig = crate::crypto::hmac_sign(&random, &self.secret)
+        let sig = crate::crypto::hmac_sign(&signed_message(&random, binding), &self.secret)
             .expect("[blackhole] FATAL: HMAC signing failed while minting CSRF token.");
         format!("{random}.{sig}")
     }
@@ -116,19 +128,32 @@ impl CsrfValidator {
     /// the server secret. The signature check is what defeats a cookie injected
     /// by a sibling subdomain / MITM: a self-consistent but unsigned pair fails.
     pub fn validate(&self, cookie_token: Option<&str>, submitted_token: Option<&str>) -> bool {
+        self.validate_bound(cookie_token, submitted_token, "")
+    }
+
+    /// [`validate`](Self::validate) for a token minted with
+    /// [`generate_bound_token`](Self::generate_bound_token): the signature
+    /// must cover this same `binding`.
+    pub fn validate_bound(
+        &self,
+        cookie_token: Option<&str>,
+        submitted_token: Option<&str>,
+        binding: &str,
+    ) -> bool {
         match (cookie_token, submitted_token) {
             (Some(c), Some(h)) if !c.is_empty() && !h.is_empty() => {
-                constant_time_str_eq(c, h) && self.verify_signature(c)
+                constant_time_str_eq(c, h) && self.verify_signature(c, binding)
             }
             _ => false,
         }
     }
 
     /// Verify a token's `<random>.<sig>` HMAC against the server secret.
-    fn verify_signature(&self, token: &str) -> bool {
+    fn verify_signature(&self, token: &str, binding: &str) -> bool {
         match token.split_once('.') {
             Some((random, sig)) if !random.is_empty() && !sig.is_empty() => {
-                crate::crypto::hmac_verify(random, sig, &self.secret).unwrap_or(false)
+                crate::crypto::hmac_verify(&signed_message(random, binding), sig, &self.secret)
+                    .unwrap_or(false)
             }
             _ => false,
         }
@@ -192,16 +217,19 @@ impl CsrfValidator {
     /// Returns `true` (allow) when neither header is present — non-browser API
     /// clients omit them, and the token check still applies. Returns `false`
     /// only when a present Origin/Referer is cross-origin and not trusted.
-    pub fn verify_origin(
+    pub fn verify_origin<'a>(
         &self,
         host: Option<&str>,
         scheme: Option<&str>,
-        origin: Option<&str>,
-        referer: Option<&str>,
+        origin: Option<&'a str>,
+        referer: Option<&'a str>,
     ) -> bool {
-        let source = match origin.or(referer) {
-            Some(s) if !s.is_empty() => s,
-            _ => return true, // no browser-set header → fall through to the token check
+        // An empty header is no header: `Origin:` with nothing after it must
+        // not stand in for the Referer that is there to be checked.
+        let present = |value: Option<&'a str>| value.filter(|v| !v.trim().is_empty());
+        let source = match present(origin).or(present(referer)) {
+            Some(s) => s,
+            None => return true, // no browser-set header → fall through to the token check
         };
         let (source_scheme, source_host) = match split_origin(source) {
             Some(parts) => parts,
@@ -222,6 +250,17 @@ impl CsrfValidator {
                 .map(|(ts, th)| th.eq_ignore_ascii_case(source_host) && scheme_matches(ts))
                 .unwrap_or(false)
         })
+    }
+}
+
+/// What a token's signature covers: the random part alone, or the random part
+/// and the host's per-session binding. The random part is hex, so the `:`
+/// cannot be forged into a different split.
+fn signed_message(random: &str, binding: &str) -> String {
+    if binding.is_empty() {
+        random.to_string()
+    } else {
+        format!("{random}:{binding}")
     }
 }
 
@@ -393,6 +432,39 @@ mod tests {
         assert!(v.verify_origin(Some("app.test"), None, Some("https://app.test"), None));
         // Same-origin via Referer fallback → allow.
         assert!(v.verify_origin(Some("app.test"), None, None, Some("https://app.test/page")));
+    }
+
+    #[test]
+    fn a_bound_token_verifies_only_under_its_own_binding() {
+        let v = vd();
+        let token = v.generate_bound_token("session-a-secret");
+        assert!(v.validate_bound(Some(&token), Some(&token), "session-a-secret"));
+        // Another session, or the unbound check, refuses it.
+        assert!(!v.validate_bound(Some(&token), Some(&token), "session-b-secret"));
+        assert!(!v.validate(Some(&token), Some(&token)));
+        // And an unbound token does not pass a bound check.
+        let unbound = v.generate_token();
+        assert!(!v.validate_bound(Some(&unbound), Some(&unbound), "session-a-secret"));
+    }
+
+    #[test]
+    fn an_empty_origin_falls_back_to_the_referer() {
+        let v = vd();
+        assert!(!v.verify_origin(Some("app.test"), None, Some(""), Some("https://evil.test/")));
+        assert!(!v.verify_origin(
+            Some("app.test"),
+            None,
+            Some("  "),
+            Some("https://evil.test/")
+        ));
+        assert!(v.verify_origin(
+            Some("app.test"),
+            None,
+            Some(""),
+            Some("https://app.test/form")
+        ));
+        // Both empty: no browser header at all, the token check decides.
+        assert!(v.verify_origin(Some("app.test"), None, Some(""), Some("")));
     }
 
     #[test]

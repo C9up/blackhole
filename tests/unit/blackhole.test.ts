@@ -184,17 +184,23 @@ describe("blackhole", () => {
 		expect(h["content-security-policy"]).toBe(
 			"default-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; script-src 'self'",
 		);
+		// Each header turns off on its own key.
 		expect(
 			createBlackhole({
-				securityHeaders: false,
+				xFrame: { enabled: false },
+				hsts: { enabled: false },
+				contentTypeSniffing: { enabled: false },
+				csp: { enabled: false },
+				referrerPolicy: { enabled: false },
+				permissionsPolicy: { enabled: false },
 				secret: SECRET,
 			}).securityHeaders(),
-		).toEqual({});
+		).toEqual({ "x-xss-protection": "0" });
 	});
 
 	it("CSP @nonce: substitutes per-request nonce (AdonisJS idiom)", () => {
 		const bh = createBlackhole({
-			securityHeaders: { csp: "default-src 'self'; script-src 'self' @nonce" },
+			csp: { policy: "default-src 'self'; script-src 'self' @nonce" },
 			secret: SECRET,
 		});
 		expect(bh.cspHasNonce()).toBe(true);
@@ -214,7 +220,7 @@ describe("blackhole", () => {
 		// A policy written WITHOUT the token reports false.
 		expect(
 			createBlackhole({
-				securityHeaders: { csp: "default-src 'self'" },
+				csp: { policy: "default-src 'self'" },
 				secret: SECRET,
 			}).cspHasNonce(),
 		).toBe(false);
@@ -280,14 +286,12 @@ describe("CSP directive defaults and removal", () => {
 			defineConfig({
 				// CSP only here; blackhole fails closed without a CSRF secret.
 				csrf: false,
-				securityHeaders: {
-					csp: {
-						directives: {
-							"script-src": [
-								...(defaults["script-src"] ?? []),
-								"https://cdn.example",
-							],
-						},
+				csp: {
+					directives: {
+						"script-src": [
+							...(defaults["script-src"] ?? []),
+							"https://cdn.example",
+						],
 					},
 				},
 			}),
@@ -307,10 +311,8 @@ describe("CSP directive defaults and removal", () => {
 			defineConfig({
 				// CSP only here; blackhole fails closed without a CSRF secret.
 				csrf: false,
-				securityHeaders: {
-					csp: {
-						directives: { "default-src": dangerouslyDisableDefaultSrc },
-					},
+				csp: {
+					directives: { "default-src": dangerouslyDisableDefaultSrc },
 				},
 			}),
 		);
@@ -328,9 +330,7 @@ describe("CSP directive defaults and removal", () => {
 			defineConfig({
 				// CSP only here; blackhole fails closed without a CSRF secret.
 				csrf: false,
-				securityHeaders: {
-					csp: { directives: { "upgrade-insecure-requests": null } },
-				},
+				csp: { directives: { "upgrade-insecure-requests": null } },
 			}),
 		);
 		const csp = bh.securityHeaders()["content-security-policy"] as string;
@@ -397,11 +397,37 @@ describe("blackhole > configure", () => {
 		expect(calls).toContain("middleware:@c9up/blackhole/middleware:router");
 	});
 
-	it("writes a config that leaves CSRF off and says when to turn it on", async () => {
+	it("writes a config with CSRF on", async () => {
+		// Off, the Origin check went with it: a fresh app accepted cross-site
+		// writes while its comment promised a same-origin guard.
 		const { codemods, files } = recorder();
 		await configure(codemods);
 		const config = files.get("config/blackhole.ts") ?? "";
-		expect(config).toContain("csrf: false");
+		expect(config).toContain("csrf: true");
+		expect(config).not.toContain("csrf: false");
 		expect(config).toContain("APP_KEY");
+	});
+
+	it("writes the protective headers one key each", async () => {
+		const { codemods, files } = recorder();
+		await configure(codemods);
+		const config = files.get("config/blackhole.ts") ?? "";
+		for (const key of ["xFrame:", "hsts:", "contentTypeSniffing:", "csp:"]) {
+			expect(config).toContain(key);
+		}
+		expect(config).not.toContain("securityHeaders");
+	});
+
+	it("refuses a cross-origin POST with the generated config", () => {
+		// What `csrf: true, secret: APP_KEY` builds, as the stub writes it.
+		const bh = createBlackhole({ csrf: true, secret: SECRET });
+		const result = bh.check({
+			method: "POST",
+			path: "/orders",
+			headers: { host: "app.test", origin: "https://evil.test" },
+		});
+		expect(result.allowed).toBe(false);
+		expect(result.status).toBe(403);
+		expect(result.body).toContain("E_BLACKHOLE_CSRF_ORIGIN_MISMATCH");
 	});
 });

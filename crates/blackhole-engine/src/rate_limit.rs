@@ -1,16 +1,19 @@
-//! True sliding-window rate limiter.
+//! Sliding-window rate limiter, in constant memory per key.
 //!
-//! Tracks individual request timestamps per key (typically client IP) using
-//! a `VecDeque<Instant>`. On each call, expired entries are evicted from the
-//! front of the deque and the new timestamp is pushed to the back. The
-//! request is allowed iff `deque.len() <= max_requests`.
+//! Each key holds two counters — the requests of its current window and of the
+//! one before — instead of a timestamp per request. The count a request is
+//! judged against weighs the previous window by how much of it still overlaps
+//! the sliding window, plus all of the current one. That keeps what a true
+//! sliding log gives (no 2× burst across a window boundary, which a fixed
+//! window allows) at a fixed cost per key.
 //!
-//! This prevents the fixed-window burst problem where 2× the limit can be
-//! sent across a window boundary.
+//! A log of one `Instant` per request made memory grow with `max × keys`: at
+//! `max: 1000` the bucket cap alone was several gigabytes, reachable by one
+//! client rotating source addresses.
 //!
 //! @implements FR46
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -55,20 +58,57 @@ pub struct RateLimiter {
     state: Mutex<State>,
 }
 
+/// One key's two windows. Constant size, whatever the limit.
+#[derive(Debug, Clone, Copy)]
+struct Bucket {
+    /// When the current window began.
+    started: Instant,
+    /// Requests admitted in the current window.
+    current: u32,
+    /// Requests admitted in the window just before it.
+    previous: u32,
+}
+
+impl Bucket {
+    fn new(now: Instant) -> Self {
+        Self {
+            started: now,
+            current: 0,
+            previous: 0,
+        }
+    }
+
+    /// Move the windows forward to the one `now` falls in.
+    fn roll(&mut self, now: Instant, window: Duration) {
+        let elapsed = now.duration_since(self.started);
+        if elapsed >= window * 2 {
+            // Both windows are behind us: nothing they counted still weighs.
+            *self = Bucket::new(now);
+        } else if elapsed >= window {
+            self.previous = self.current;
+            self.current = 0;
+            self.started += window;
+        }
+    }
+
+    /// Whether neither window can weigh on a request any more.
+    fn is_spent(&self, now: Instant, window: Duration) -> bool {
+        now.duration_since(self.started) >= window * 2
+    }
+}
+
 struct State {
-    buckets: HashMap<String, VecDeque<Instant>>,
+    buckets: HashMap<String, Bucket>,
     /// When the map was last swept end to end, so the sweep can be amortised
     /// instead of paid on every request.
     last_sweep: Instant,
 }
 
 impl State {
-    /// Drop every entry older than the window, and every bucket left empty.
+    /// Drop every bucket whose windows have both run out.
     fn sweep(&mut self, now: Instant, window: Duration) {
-        self.buckets.retain(|_, deque| {
-            drop_expired(deque, now, window);
-            !deque.is_empty()
-        });
+        self.buckets
+            .retain(|_, bucket| !bucket.is_spent(now, window));
         self.last_sweep = now;
     }
 
@@ -79,23 +119,10 @@ impl State {
             .buckets
             .iter()
             .take(EVICTION_SAMPLE)
-            .filter_map(|(key, deque)| deque.front().map(|first| (key, *first)))
-            .min_by_key(|(_, first)| *first)
+            .min_by_key(|(_, bucket)| bucket.started)
             .map(|(key, _)| key.clone());
         if let Some(key) = victim {
             self.buckets.remove(&key);
-        }
-    }
-}
-
-/// Pop the entries that have fallen out of the window. The deque is ordered by
-/// arrival, so this only ever touches the front.
-fn drop_expired(deque: &mut VecDeque<Instant>, now: Instant, window: Duration) {
-    while let Some(front) = deque.front() {
-        if now.duration_since(*front) > window {
-            deque.pop_front();
-        } else {
-            break;
         }
     }
 }
@@ -114,57 +141,55 @@ impl RateLimiter {
 
     /// Check a request and return the full outcome (limit / remaining / retry-after).
     pub fn check_detailed(&self, key: &str) -> RateLimitOutcome {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let now = Instant::now();
+        self.check_at(key, Instant::now())
+    }
 
-        // Reclaim expired buckets across the whole map, but only now and then:
+    /// [`check_detailed`](Self::check_detailed) at a given instant — the clock
+    /// is a parameter so the window arithmetic can be tested without sleeping.
+    pub fn check_at(&self, key: &str, now: Instant) -> RateLimitOutcome {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Reclaim spent buckets across the whole map, but only now and then:
         // this is the only O(buckets) work here, and paying it per request is
         // what let a varying key stall every other request (see SWEEP_INTERVAL).
-        if now.duration_since(state.last_sweep) >= SWEEP_INTERVAL {
+        if now.saturating_duration_since(state.last_sweep) >= SWEEP_INTERVAL {
             state.sweep(now, self.window);
         }
 
         // Bound memory: a new key that would push the map past its cap needs
         // room made for it. No sweep here — one has run within the last
-        // SWEEP_INTERVAL by the branch above, so expired buckets are already
+        // SWEEP_INTERVAL by the branch above, so spent buckets are already
         // gone and a second full pass would only re-walk 100k live ones.
         if !state.buckets.contains_key(key) && state.buckets.len() >= MAX_BUCKETS {
             state.evict_sampled();
         }
 
         let window = self.window;
-        let deque = state.buckets.entry(key.to_string()).or_default();
+        let max = self.max_requests;
+        let bucket = state
+            .buckets
+            .entry(key.to_string())
+            .or_insert_with(|| Bucket::new(now));
+        bucket.roll(now, window);
 
-        // This key's own expired entries, which the amortised sweep may not
-        // have reached yet. Always paid, and only ever touches one bucket.
-        drop_expired(deque, now, window);
-
-        // Seconds until the oldest in-window entry expires → when a slot frees.
-        let retry_after_secs = deque
-            .front()
-            .map(|front| {
-                self.window
-                    .saturating_sub(now.duration_since(*front))
-                    .as_secs()
-            })
-            .unwrap_or(0);
-
-        if deque.len() as u32 >= self.max_requests {
+        let estimate = weighted_count(bucket, now, window);
+        if estimate + 1.0 > f64::from(max) {
             return RateLimitOutcome {
                 allowed: false,
-                limit: self.max_requests,
+                limit: max,
                 remaining: 0,
                 // At least 1s so a client never busy-loops on `Retry-After: 0`.
-                retry_after_secs: retry_after_secs.max(1),
+                retry_after_secs: seconds_until_admitted(bucket, now, window, max).max(1),
             };
         }
 
-        deque.push_back(now);
+        bucket.current = bucket.current.saturating_add(1);
+        let used = (estimate + 1.0).ceil();
         RateLimitOutcome {
             allowed: true,
-            limit: self.max_requests,
-            remaining: self.max_requests.saturating_sub(deque.len() as u32),
-            retry_after_secs,
+            limit: max,
+            remaining: (f64::from(max) - used).max(0.0) as u32,
+            retry_after_secs: ceil_secs(window.saturating_sub(now.duration_since(bucket.started))),
         }
     }
 
@@ -172,16 +197,48 @@ impl RateLimiter {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         match state.buckets.get(key) {
-            Some(deque) => {
-                let active = deque
-                    .iter()
-                    .filter(|t| now.duration_since(**t) <= self.window)
-                    .count() as u32;
-                self.max_requests.saturating_sub(active)
+            Some(bucket) => {
+                let mut bucket = *bucket;
+                bucket.roll(now, self.window);
+                let used = weighted_count(&bucket, now, self.window).ceil();
+                (f64::from(self.max_requests) - used).max(0.0) as u32
             }
             None => self.max_requests,
         }
     }
+}
+
+/// The requests the sliding window holds at `now`: all of the current window,
+/// and the share of the previous one the sliding window still overlaps.
+fn weighted_count(bucket: &Bucket, now: Instant, window: Duration) -> f64 {
+    let elapsed = now.duration_since(bucket.started).as_secs_f64();
+    let span = window.as_secs_f64();
+    let overlap = ((span - elapsed) / span).clamp(0.0, 1.0);
+    f64::from(bucket.previous) * overlap + f64::from(bucket.current)
+}
+
+/// Seconds from `now` until one more request fits under `max`.
+fn seconds_until_admitted(bucket: &Bucket, now: Instant, window: Duration, max: u32) -> u64 {
+    let span = window.as_secs_f64();
+    let elapsed = now.duration_since(bucket.started).as_secs_f64();
+    let left_in_window = (span - elapsed).max(0.0);
+    let room = f64::from(max) - 1.0;
+    let current = f64::from(bucket.current);
+    let wait = if current <= room {
+        // The current window still has room; the previous one has to slide
+        // far enough out: previous × (left - t) / span + current ≤ room.
+        let previous = f64::from(bucket.previous).max(1.0);
+        left_in_window - span * (room - current) / previous
+    } else {
+        // The current window is full: once it becomes the previous one, it
+        // has to slide out until current × (span - t') / span ≤ room.
+        left_in_window + span * (1.0 - room / current)
+    };
+    wait.max(0.0).ceil() as u64
+}
+
+fn ceil_secs(duration: Duration) -> u64 {
+    duration.as_secs_f64().ceil() as u64
 }
 
 #[cfg(test)]
@@ -219,6 +276,81 @@ mod tests {
         limiter.check_detailed("ip1");
         limiter.check_detailed("ip1");
         assert_eq!(limiter.remaining("ip1"), 3);
+    }
+
+    const WINDOW: Duration = Duration::from_secs(60);
+
+    #[test]
+    fn a_full_window_still_weighs_at_the_start_of_the_next() {
+        // The fixed-window burst: max at the end of one window, max again at
+        // the start of the next. The sliding count refuses the second batch.
+        let limiter = RateLimiter::new(10, 60);
+        let start = Instant::now();
+        for _ in 0..10 {
+            assert!(limiter.check_at("k", start).allowed);
+        }
+        let just_after = start + WINDOW + Duration::from_secs(1);
+        assert!(!limiter.check_at("k", just_after).allowed);
+        // Half a window later, half of the previous window has slid out.
+        let halfway = start + WINDOW + Duration::from_secs(30);
+        let admitted = (0..10)
+            .filter(|_| limiter.check_at("k", halfway).allowed)
+            .count();
+        assert_eq!(admitted, 5);
+    }
+
+    #[test]
+    fn two_idle_windows_forget_the_key() {
+        let limiter = RateLimiter::new(1, 60);
+        let start = Instant::now();
+        assert!(limiter.check_at("k", start).allowed);
+        assert!(
+            !limiter
+                .check_at("k", start + Duration::from_secs(30))
+                .allowed
+        );
+        assert!(limiter.check_at("k", start + WINDOW * 2).allowed);
+    }
+
+    #[test]
+    fn retry_after_is_when_a_request_is_admitted_again() {
+        let limiter = RateLimiter::new(2, 60);
+        let start = Instant::now();
+        assert!(limiter.check_at("k", start).allowed);
+        assert!(limiter.check_at("k", start).allowed);
+        let refused = limiter.check_at("k", start + Duration::from_secs(10));
+        assert!(!refused.allowed);
+        let wait = Duration::from_secs(refused.retry_after_secs);
+        // Not admitted a second before Retry-After says…
+        assert!(
+            !limiter
+                .check_at(
+                    "k",
+                    start + Duration::from_secs(10) + wait - Duration::from_secs(1)
+                )
+                .allowed
+        );
+        // …and admitted once it has passed.
+        assert!(
+            limiter
+                .check_at("k", start + Duration::from_secs(10) + wait)
+                .allowed
+        );
+    }
+
+    #[test]
+    fn a_bucket_is_constant_size_whatever_the_limit() {
+        // The memory a key costs must not grow with `max`: the old log held
+        // one Instant per admitted request.
+        assert!(std::mem::size_of::<Bucket>() <= 32);
+        let limiter = RateLimiter::new(1_000_000, 60);
+        let start = Instant::now();
+        for _ in 0..10_000 {
+            limiter.check_at("k", start);
+        }
+        let state = limiter.state.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.buckets.len(), 1);
+        assert_eq!(state.buckets.get("k").map(|b| b.current), Some(10_000));
     }
 
     #[test]

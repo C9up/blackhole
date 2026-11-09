@@ -31,7 +31,22 @@ impl Blackhole {
         csrf_methods: Option<Vec<String>>,
         csrf_secret: Option<String>,
         csrf_trusted_origins: Option<Vec<String>>,
+        xss_allow_attributes: Option<Vec<String>>,
     ) -> Result<Self> {
+        let xss_allow_attributes = xss_allow_attributes.unwrap_or_default();
+        // A name outside the opt-in list is refused rather than ignored: the
+        // caller asked for an attribute to survive and would otherwise find
+        // it silently stripped.
+        if let Some(unknown) = xss_allow_attributes
+            .iter()
+            .find(|name| !blackhole_engine::xss::OPT_IN_ATTRIBUTES.contains(&name.as_str()))
+        {
+            return Err(Error::from_reason(format!(
+                "[blackhole] xss.allowAttributes: '{}' cannot be allowed (expected one of {})",
+                unknown,
+                blackhole_engine::xss::OPT_IN_ATTRIBUTES.join(", ")
+            )));
+        }
         let rate_limit = match (rate_limit_max, rate_limit_window) {
             // A limit of 0 or a window of 0 would let every request through
             // (a zero window expires each hit at once): refused, not ignored.
@@ -54,13 +69,18 @@ impl Blackhole {
                 csrf_methods: csrf_methods.unwrap_or_default(),
                 csrf_trusted_origins: csrf_trusted_origins.unwrap_or_default(),
                 csrf_secret: csrf_secret.map(String::into_bytes).unwrap_or_default(),
+                xss_allow_attributes,
             }),
         })
     }
 
+    /// A fresh CSRF token. With a `binding` (the session's secret), its
+    /// signature covers that too, and it verifies only when `check` is given
+    /// the same binding.
     #[napi]
-    pub fn generate_csrf_token(&self) -> String {
-        self.filter.generate_csrf_token()
+    pub fn generate_csrf_token(&self, binding: Option<String>) -> String {
+        self.filter
+            .generate_bound_csrf_token(binding.as_deref().unwrap_or_default())
     }
 
     /// Check a request. Returns `{ allowed: true, request }` or `{ allowed: false, status, body }`.
@@ -71,8 +91,9 @@ impl Blackhole {
     /// through the generated declarations. Keep the two in step: a renamed
     /// key here must be renamed there in the same edit.
     // Positional for the same NAPI reason as the constructor: the arguments
-    // are the generated JavaScript signature, and `scheme` and `checks` are
-    // appended last so a caller that does not pass them still works.
+    // are the generated JavaScript signature, and `scheme`, `checks`, `host`
+    // and `csrf_binding` are appended last so a caller that does not pass
+    // them still works.
     #[allow(clippy::too_many_arguments)]
     #[napi(
         ts_return_type = "{ allowed: boolean; status?: number; body?: string; headers?: Record<string, string>; rateLimit?: { limit: number; remaining: number; resetSeconds: number }; csrfEnforced?: boolean }"
@@ -87,6 +108,8 @@ impl Blackhole {
         remote_addr: String,
         scheme: Option<String>,
         checks: Option<Vec<String>>,
+        host: Option<String>,
+        csrf_binding: Option<String>,
     ) -> Result<serde_json::Value> {
         // Some of `rateLimit` / `shield` / `csrf` run part of a split
         // pipeline; none runs everything.
@@ -125,6 +148,8 @@ impl Blackhole {
             body,
             remote_addr,
             scheme: scheme.unwrap_or_default(),
+            host: host.unwrap_or_default(),
+            csrf_binding: csrf_binding.unwrap_or_default(),
         };
         let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.filter.check_only(req, checks)
@@ -158,6 +183,10 @@ impl Blackhole {
         if !self.filter.config().xss_enabled {
             return body;
         }
-        blackhole_engine::sanitize_response(&body, &content_type)
+        blackhole_engine::xss::sanitize_response_with(
+            &body,
+            &content_type,
+            &self.filter.config().xss_allow_attributes,
+        )
     }
 }

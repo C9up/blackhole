@@ -51,6 +51,14 @@
     "./hono": {
       "types": "./src/hono.ts",
       "import": "./src/hono.ts"
+    },
+    "./limiter": {
+      "types": "./src/limiter.ts",
+      "import": "./src/limiter.ts"
+    },
+    "./services/limiter": {
+      "types": "./src/services/limiter.ts",
+      "import": "./src/services/limiter.ts"
     }
   },
   "scripts": {
@@ -132,6 +140,14 @@
       "./hono": {
         "types": "./dist/hono.d.ts",
         "import": "./dist/hono.js"
+      },
+      "./limiter": {
+        "types": "./dist/limiter.d.ts",
+        "import": "./dist/limiter.js"
+      },
+      "./services/limiter": {
+        "types": "./dist/services/limiter.d.ts",
+        "import": "./dist/services/limiter.js"
       }
     },
     "access": "public"

@@ -15,6 +15,7 @@ import {
 	type CoreRequest,
 	csrfBodyString,
 	rateLimitHeaders,
+	rawPathOf,
 	runRequestPhase,
 	runResponsePhase,
 	serializeCookie,
@@ -37,6 +38,8 @@ interface ExpressRequest {
 	ip?: string;
 	/** `http` / `https` — honours Express's `trust proxy`. */
 	protocol?: string;
+	/** The host name without its port — honours Express's `trust proxy`. */
+	hostname?: string;
 	socket?: { remoteAddress?: string };
 	/** CSRF token for this request (Adonis idiom). Seeded by the adapter. */
 	csrfToken?: string;
@@ -68,6 +71,30 @@ function flattenHeaders(
 		else if (typeof value === "string") out[key] = value;
 	}
 	return out;
+}
+
+/**
+ * `host[:port]` the way Express resolved it under its `trust proxy` setting.
+ *
+ * Express exposes the resolved name as `req.hostname` but drops the port, and
+ * an Origin carries one. So the header it was read from is found again: the
+ * first `X-Forwarded-Host` when that is where the name came from (Express
+ * reads it only from a trusted proxy), the `Host` header otherwise.
+ */
+function expressHost(
+	hostname: string | undefined,
+	headers: Readonly<Record<string, string>>,
+): string | undefined {
+	if (hostname === undefined) return undefined;
+	const forwarded = headers["x-forwarded-host"]?.split(",")[0]?.trim();
+	const nameOf = (host: string) =>
+		host.startsWith("[")
+			? host.slice(0, host.indexOf("]") + 1)
+			: (host.split(":")[0] ?? host);
+	if (forwarded && nameOf(forwarded).toLowerCase() === hostname.toLowerCase()) {
+		return forwarded;
+	}
+	return headers.host;
 }
 
 function appendVary(res: ExpressResponse, value: string): void {
@@ -132,12 +159,15 @@ export function blackholeExpress(options: BlackholeOptions = {}) {
 
 		const coreReq: CoreRequest = {
 			method: req.method,
-			path: req.path ?? new URL(req.url, "http://localhost").pathname,
+			// `req.path` is the raw path (no `..` resolved); the fallback must be
+			// too, never a WHATWG-normalized one.
+			path: req.path ?? rawPathOf(req.url),
 			url: req.originalUrl ?? req.url,
 			headers,
 			body: csrfBodyString(req.body),
 			remoteAddr: rateLimitKey,
 			protocol: req.protocol,
+			host: expressHost(req.hostname, headers),
 		};
 		const outcome = runRequestPhase(bh, coreReq);
 
@@ -205,8 +235,10 @@ export function blackholeExpress(options: BlackholeOptions = {}) {
 					contentType: ct,
 					cspNonce: outcome.cspNonce,
 				});
+				// Set before the handler ran; added again only where missing, so
+				// a route's own CSP or X-Frame-Options stands.
 				for (const [name, value] of Object.entries(secHeaders)) {
-					res.setHeader(name, value);
+					if (res.getHeader(name) === undefined) res.setHeader(name, value);
 				}
 				if (typeof body === "string") return originalSend(outBody);
 			}

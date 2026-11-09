@@ -5,21 +5,30 @@ import { defineConfig } from '@c9up/blackhole'
 import env from '#start/env'
 
 export default defineConfig({
-  // Signs the CSRF double-submit token. Required once `csrf` is on.
+  // Signs the CSRF double-submit token. Required while `csrf` is on.
   secret: env.get('APP_KEY'),
 
-  // Off until the app has a form to protect. Turn it on with the first one:
-  // the same-origin guard covers a lot, but it is not a CSRF token.
-  csrf: false,
+  // POST, PUT, PATCH and DELETE need a CSRF token (the `XSRF-TOKEN` cookie
+  // echoed in `X-XSRF-TOKEN`, or the `_csrf` form field), and an Origin or
+  // Referer from this site or `trustedOrigins`. Both checks belong to this
+  // switch: turning it off leaves cross-site writes unchecked.
+  csrf: true,
 
-  securityHeaders: {
-    // The default policy names `@nonce`, substituted per request. A view
-    // layer reads it from `response.nonce` and stamps its inline scripts —
-    // `@c9up/aurora` does this on its own. Serving inline scripts from
-    // another renderer means stamping them the same way, or the browser
-    // blocks them and the page never hydrates.
-    //
-    // Widen it here rather than removing it: a policy that is turned off
-    // protects nothing.
-  },
+  // The protective headers, each on with a hardened default; turn one off
+  // with `{ enabled: false }`.
+  xFrame: { enabled: true, action: 'SAMEORIGIN' },
+  hsts: { enabled: true, maxAge: '180 days', includeSubDomains: true },
+  contentTypeSniffing: { enabled: true },
+
+  // The default policy names `@nonce`, substituted per request. A view
+  // layer reads it from `response.nonce` and stamps its inline scripts —
+  // `@c9up/aurora` does this on its own. Serving inline scripts from
+  // another renderer means stamping them the same way, or the browser
+  // blocks them and the page never hydrates.
+  //
+  // Widen it with `directives` rather than turning it off — a policy that is
+  // turned off protects nothing. `directives` start from a hardened baseline
+  // whose `scriptSrc` has no `@nonce`: name it again when you set scriptSrc,
+  // e.g. `directives: { scriptSrc: ["'self'", '@nonce', 'https://cdn.example'] }`.
+  csp: { enabled: true, reportOnly: false },
 })

@@ -24,6 +24,9 @@ pub struct BlackholeConfig {
     /// HMAC secret for signing CSRF tokens (the app's `APP_KEY`). Empty falls
     /// back to a per-process ephemeral key (single-instance dev safety net).
     pub csrf_secret: Vec<u8>,
+    /// Attributes the XSS sanitizer keeps on top of its default allow-list —
+    /// a subset of [`crate::xss::OPT_IN_ATTRIBUTES`]. Empty by default.
+    pub xss_allow_attributes: Vec<String>,
 }
 
 impl Default for BlackholeConfig {
@@ -38,6 +41,7 @@ impl Default for BlackholeConfig {
             csrf_methods: Vec::new(),
             csrf_trusted_origins: Vec::new(),
             csrf_secret: Vec::new(),
+            xss_allow_attributes: Vec::new(),
         }
     }
 }
@@ -94,6 +98,12 @@ impl BlackholeFilter {
 
     pub fn generate_csrf_token(&self) -> String {
         self.csrf_validator.generate_token()
+    }
+
+    /// A CSRF token whose signature also covers `binding` (the session's
+    /// secret). Empty `binding` is [`generate_csrf_token`](Self::generate_csrf_token).
+    pub fn generate_bound_csrf_token(&self, binding: &str) -> String {
+        self.csrf_validator.generate_bound_token(binding)
     }
 
     pub fn check(&self, request: Request) -> FilterResult {
@@ -241,7 +251,14 @@ impl BlackholeFilter {
                     .map(|(_, v)| v.as_str())
             };
             let scheme = Some(request.scheme.as_str()).filter(|s| !s.is_empty());
-            if !v.verify_origin(find("host"), scheme, find("origin"), find("referer")) {
+            // The host the request was addressed to, as the host resolved it
+            // — the same trust-proxy decision that gave the scheme. Comparing a
+            // proxy-resolved scheme with the raw `Host` (the upstream name a
+            // proxy rewrote it to) refused every legitimate request.
+            let host = Some(request.host.as_str())
+                .filter(|h| !h.is_empty())
+                .or_else(|| find("host"));
+            if !v.verify_origin(host, scheme, find("origin"), find("referer")) {
                 return Some(Response::json(
                     403,
                     r#"{"error":{"code":"E_BLACKHOLE_CSRF_ORIGIN_MISMATCH","message":"Cross-origin state-changing request rejected"}}"#,
@@ -267,7 +284,11 @@ impl BlackholeFilter {
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
                 .and_then(|(_, c)| v.token_from_cookie_header(c));
-            if !v.validate(cookie_token.as_deref(), submitted.as_deref()) {
+            if !v.validate_bound(
+                cookie_token.as_deref(),
+                submitted.as_deref(),
+                &request.csrf_binding,
+            ) {
                 // `E_BAD_CSRF_TOKEN` with this exact message is what
                 // `@adonisjs/shield` raises. `middleware.ts` keys off that code
                 // to turn a browser request into a flash + redirect back, the
@@ -298,6 +319,8 @@ mod tests {
             body: String::new(),
             remote_addr: "127.0.0.1".into(),
             scheme: String::new(),
+            host: String::new(),
+            csrf_binding: String::new(),
         }
     }
 
@@ -385,6 +408,8 @@ mod tests {
             body: String::new(),
             remote_addr: "127.0.0.1".into(),
             scheme: String::new(),
+            host: String::new(),
+            csrf_binding: String::new(),
         };
         assert!(matches!(f.check(r), FilterResult::Allow(_)));
     }
@@ -405,6 +430,8 @@ mod tests {
             body: String::new(),
             remote_addr: "127.0.0.1".into(),
             scheme: String::new(),
+            host: String::new(),
+            csrf_binding: String::new(),
         };
         assert!(matches!(f.check(r), FilterResult::Allow(_)));
     }
@@ -424,6 +451,8 @@ mod tests {
             body: format!("name=x&_csrf={}", token),
             remote_addr: "127.0.0.1".into(),
             scheme: String::new(),
+            host: String::new(),
+            csrf_binding: String::new(),
         };
         assert!(matches!(f.check(r), FilterResult::Allow(_)));
     }
@@ -460,6 +489,8 @@ mod tests {
             body: String::new(),
             remote_addr: "127.0.0.1".into(),
             scheme: String::new(),
+            host: String::new(),
+            csrf_binding: String::new(),
         };
         assert!(matches!(f.check(r), FilterResult::Reject(_)));
     }
@@ -483,6 +514,8 @@ mod tests {
             body: String::new(),
             remote_addr: "127.0.0.1".into(),
             scheme: String::new(),
+            host: String::new(),
+            csrf_binding: String::new(),
         };
         assert!(matches!(f.check(r), FilterResult::Reject(_)));
     }
@@ -504,8 +537,61 @@ mod tests {
             body: String::new(),
             remote_addr: "127.0.0.1".into(),
             scheme: String::new(),
+            host: String::new(),
+            csrf_binding: String::new(),
         };
         assert!(matches!(f.check(r), FilterResult::Allow(_)));
+    }
+
+    fn post_with_token(token: &str) -> Request {
+        let mut r = req("POST", "/");
+        r.headers.insert("x-xsrf-token".into(), token.to_string());
+        r.headers
+            .insert("cookie".into(), format!("XSRF-TOKEN={token}"));
+        r
+    }
+
+    #[test]
+    fn origin_is_compared_with_the_resolved_host() {
+        // Behind a proxy that rewrote `Host` to its upstream name, the host
+        // resolved from `X-Forwarded-Host` is what the browser addressed.
+        let f = BlackholeFilter::new(BlackholeConfig::default());
+        let token = f.generate_csrf_token();
+        let mut r = post_with_token(&token);
+        r.headers.insert("host".into(), "upstream:3000".into());
+        r.headers
+            .insert("origin".into(), "https://app.example".into());
+        r.scheme = "https".into();
+        r.host = "app.example".into();
+        assert!(matches!(f.check(r), FilterResult::Allow(_)));
+
+        // Without a resolved host, the raw Host header still decides.
+        let mut r = post_with_token(&token);
+        r.headers.insert("host".into(), "upstream:3000".into());
+        r.headers
+            .insert("origin".into(), "https://app.example".into());
+        r.scheme = "https".into();
+        assert!(matches!(f.check(r), FilterResult::Reject(_)));
+
+        // And the resolved host is no wildcard: another origin is refused.
+        let mut r = post_with_token(&token);
+        r.headers.insert("host".into(), "app.example".into());
+        r.headers
+            .insert("origin".into(), "https://evil.example".into());
+        r.host = "app.example".into();
+        assert!(matches!(f.check(r), FilterResult::Reject(_)));
+    }
+
+    #[test]
+    fn a_bound_token_passes_only_for_its_own_session() {
+        let f = BlackholeFilter::new(BlackholeConfig::default());
+        let token = f.generate_bound_csrf_token("session-a");
+        let mut mine = post_with_token(&token);
+        mine.csrf_binding = "session-a".into();
+        assert!(matches!(f.check(mine), FilterResult::Allow(_)));
+        let mut theirs = post_with_token(&token);
+        theirs.csrf_binding = "session-b".into();
+        assert!(matches!(f.check(theirs), FilterResult::Reject(_)));
     }
 
     #[test]
@@ -541,6 +627,8 @@ mod tests {
             body: body.clone(),
             remote_addr: "127.0.0.1".into(),
             scheme: String::new(),
+            host: String::new(),
+            csrf_binding: String::new(),
         };
         match f.check(r) {
             FilterResult::Allow(r) => assert_eq!(r.body, body),

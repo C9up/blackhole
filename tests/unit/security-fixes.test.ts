@@ -4,10 +4,10 @@ import { createBlackhole } from "../../src/index.js";
 const SECRET = "test-app-key-32-bytes-long-aaaaaa";
 
 describe("CSP hardening + Report-Only", () => {
-	it("emits the Report-Only header when cspReportOnly is set", () => {
+	it("emits the Report-Only header when csp.reportOnly is set", () => {
 		const h = createBlackhole({
 			secret: SECRET,
-			securityHeaders: { csp: "default-src 'self'", cspReportOnly: true },
+			csp: { policy: "default-src 'self'", reportOnly: true },
 		}).securityHeaders();
 		expect(h["content-security-policy-report-only"]).toBe("default-src 'self'");
 		expect(h["content-security-policy"]).toBeUndefined();
@@ -16,11 +16,14 @@ describe("CSP hardening + Report-Only", () => {
 	it("substitutes @nonce inside the Report-Only header too", () => {
 		const bh = createBlackhole({
 			secret: SECRET,
-			securityHeaders: { csp: "script-src @nonce", cspReportOnly: true },
+			csp: {
+				policy: "default-src 'self'; script-src @nonce",
+				reportOnly: true,
+			},
 		});
 		const h = bh.securityHeaders("abc123");
 		expect(h["content-security-policy-report-only"]).toBe(
-			"script-src 'nonce-abc123'",
+			"default-src 'self'; script-src 'nonce-abc123'",
 		);
 	});
 });
@@ -30,7 +33,7 @@ describe("HSTS maxAge validation", () => {
 		expect(() =>
 			createBlackhole({
 				secret: SECRET,
-				securityHeaders: { hsts: { maxAge: -1 } },
+				hsts: { maxAge: -1 },
 			}),
 		).toThrow(/HSTS maxAge/);
 	});

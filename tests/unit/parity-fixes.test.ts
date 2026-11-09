@@ -220,9 +220,7 @@ describe("#9 structured CSP object", () => {
 	it("serializes directives merged over the hardened baseline", () => {
 		const h = createBlackhole({
 			csrf: false,
-			securityHeaders: {
-				csp: { directives: { "script-src": ["'self'", "'nonce-x'"] } },
-			},
+			csp: { directives: { "script-src": ["'self'", "'nonce-x'"] } },
 		}).securityHeaders();
 		const csp = h["content-security-policy"];
 		expect(csp).toContain("default-src 'self'");
@@ -234,9 +232,7 @@ describe("#9 structured CSP object", () => {
 	it("useDefaults:false emits ONLY the provided directives", () => {
 		const h = createBlackhole({
 			csrf: false,
-			securityHeaders: {
-				csp: { useDefaults: false, directives: { "default-src": ["'none'"] } },
-			},
+			csp: { useDefaults: false, directives: { "default-src": ["'none'"] } },
 		}).securityHeaders();
 		expect(h["content-security-policy"]).toBe("default-src 'none'");
 	});
@@ -244,9 +240,7 @@ describe("#9 structured CSP object", () => {
 	it("reportOnly emits the Report-Only header", () => {
 		const h = createBlackhole({
 			csrf: false,
-			securityHeaders: {
-				csp: { directives: { "default-src": ["'self'"] }, reportOnly: true },
-			},
+			csp: { directives: { "default-src": ["'self'"] }, reportOnly: true },
 		}).securityHeaders();
 		expect(h["content-security-policy-report-only"]).toContain(
 			"default-src 'self'",
@@ -257,9 +251,7 @@ describe("#9 structured CSP object", () => {
 	it("supports @nonce inside a directive (per-request substitution)", () => {
 		const bh = createBlackhole({
 			csrf: false,
-			securityHeaders: {
-				csp: { directives: { "script-src": ["'self'", "@nonce"] } },
-			},
+			csp: { directives: { "script-src": ["'self'", "@nonce"] } },
 		});
 		expect(bh.cspHasNonce()).toBe(true);
 		const csp = bh.securityHeaders("abc")["content-security-policy"];

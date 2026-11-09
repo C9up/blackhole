@@ -21,6 +21,7 @@ import {
 	type CoreRequest,
 	csrfBodyString,
 	rateLimitHeaders,
+	rawPathOf,
 	runRequestPhase,
 	runResponsePhase,
 	serializeCookie,
@@ -49,6 +50,12 @@ export interface BlackholeHonoOptions extends BlackholeOptions {
 	 * a header only that proxy sets.
 	 */
 	protocol?: (c: Context) => string;
+	/**
+	 * `host[:port]`, compared with the Origin on a CSRF-guarded request.
+	 * Default: the host of the request URL — behind a proxy that rewrites
+	 * `Host`, derive it from a header only that proxy sets.
+	 */
+	host?: (c: Context) => string;
 }
 
 /** The socket address `@hono/node-server` exposes as `c.env.incoming`. */
@@ -57,6 +64,16 @@ function nodeSocketAddress(env: unknown): string | undefined {
 	const socket: unknown = Reflect.get(Object(incoming), "socket");
 	const address: unknown = Reflect.get(Object(socket), "remoteAddress");
 	return typeof address === "string" ? address : undefined;
+}
+
+/**
+ * The request target `@hono/node-server` received (`c.env.incoming.url`),
+ * before the `Request` it builds resolves `..` out of the URL.
+ */
+function nodeRequestTarget(env: unknown): string | undefined {
+	const incoming: unknown = Reflect.get(Object(env), "incoming");
+	const url: unknown = Reflect.get(Object(incoming), "url");
+	return typeof url === "string" ? url : undefined;
 }
 
 /**
@@ -90,7 +107,7 @@ function refusal(
 export function blackholeHono(
 	options: BlackholeHonoOptions = {},
 ): MiddlewareHandler {
-	const { clientIp, protocol, ...blackholeOptions } = options;
+	const { clientIp, protocol, host, ...blackholeOptions } = options;
 	const bh = createBlackhole(blackholeOptions);
 
 	return async (c, next) => {
@@ -124,9 +141,12 @@ export function blackholeHono(
 			}
 		}
 
+		const target = nodeRequestTarget(c.env);
 		const request: CoreRequest = {
 			method: c.req.method,
-			path: c.req.path,
+			// The raw target where the runtime keeps one: a `Request` URL has
+			// already had `..` and `%2e%2e` resolved by the WHATWG parser.
+			path: target === undefined ? c.req.path : rawPathOf(target),
 			url: c.req.url,
 			headers: c.req.header(),
 			body: await csrfBody(c),
@@ -134,6 +154,7 @@ export function blackholeHono(
 			protocol: protocol
 				? protocol(c)
 				: new URL(c.req.url).protocol.replace(/:$/, ""),
+			host: host ? host(c) : new URL(c.req.url).host,
 		};
 		const outcome = runRequestPhase(bh, request);
 
@@ -175,9 +196,13 @@ export function blackholeHono(
 			...outcome.corsHeaders,
 			...storeHeaders,
 			...(outcome.rateLimitHeaders ?? {}),
-			...headers,
 		})) {
 			response.headers.set(name, value);
+		}
+		// The protective headers only where the route did not set its own: a
+		// page framed by a partner, or with a CSP of its own, keeps it.
+		for (const [name, value] of Object.entries(headers)) {
+			if (!response.headers.has(name)) response.headers.set(name, value);
 		}
 		if (outcome.varyOrigin) {
 			response.headers.set(

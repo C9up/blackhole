@@ -327,7 +327,9 @@ describe("blackhole > a CSRF exemption exempts from CSRF only", () => {
 	it("still rate-limits a route an exceptRoutes predicate exempts", async () => {
 		const bh = createBlackhole({
 			secret: SECRET,
-			csrf: { exceptRoutes: (req) => req.path.startsWith("/webhooks/") },
+			csrf: {
+				exceptRoutes: (ctx) => ctx.request.url().startsWith("/webhooks/"),
+			},
 			rateLimit: { max: 1, windowSeconds: 60 },
 		});
 		const statuses: number[] = [];

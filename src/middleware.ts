@@ -15,6 +15,7 @@
  *   router.use([() => import('@c9up/blackhole/middleware')])
  */
 
+import { randomBytes } from "node:crypto";
 import { BLACKHOLE_KEY } from "./BlackholeProvider.js";
 import {
 	appendVaryValue,
@@ -59,6 +60,11 @@ export interface ReamContext {
 	 * import.
 	 */
 	containerResolver?: ContainerResolver;
+	/**
+	 * The matched route (Ream's `ctx.route`). `csrf.exceptRoutes` entries are
+	 * compared with its pattern.
+	 */
+	route?: { pattern: string } | null;
 	request: {
 		method(): string;
 		url(full?: boolean): string;
@@ -69,6 +75,12 @@ export interface ReamContext {
 		ip(): string;
 		/** `http` / `https`, trusted-proxy aware (Ream's `request.protocol()`). */
 		protocol?(): string;
+		/**
+		 * `host[:port]`, trusted-proxy aware (Ream's `request.host()`) — the
+		 * same resolution as `protocol()`, so the CSRF origin check compares an
+		 * Origin with one consistent view of the request.
+		 */
+		host?(): string | null;
 		/** CSRF token for this request (Adonis idiom: `request.csrfToken`). Seeded by the middleware. */
 		csrfToken?: string;
 		/**
@@ -247,8 +259,39 @@ async function guard(
 	return false;
 }
 
+/** Where the session keeps the secret its CSRF tokens are bound to. */
+const CSRF_SECRET_SESSION_KEY = "csrf-secret";
+
+/**
+ * The session's CSRF secret, created on first use — or `undefined` when the
+ * request has no session (no session middleware, or one registered after
+ * this one), in which case tokens are signed but bound to nothing.
+ *
+ * Binding the token to the session is what makes a leaked token worthless
+ * elsewhere: issued under one session's secret, it is refused under any
+ * other, and it dies with the session that holds the secret.
+ */
+function sessionCsrfBinding(ctx: ReamContext): string | undefined {
+	const session: unknown = Reflect.get(Object(ctx), "session");
+	if (typeof session !== "object" || session === null) return undefined;
+	const get: unknown = Reflect.get(session, "get");
+	const put: unknown = Reflect.get(session, "put");
+	if (typeof get !== "function" || typeof put !== "function") return undefined;
+	const stored: unknown = Reflect.apply(get, session, [
+		CSRF_SECRET_SESSION_KEY,
+	]);
+	if (typeof stored === "string" && stored.length > 0) return stored;
+	const secret = randomBytes(32).toString("base64url");
+	Reflect.apply(put, session, [CSRF_SECRET_SESSION_KEY, secret]);
+	return secret;
+}
+
 /** The engine's view of a Ream request. */
-function coreRequest(ctx: ReamContext, remoteAddr: string): CoreRequest {
+function coreRequest(
+	ctx: ReamContext,
+	remoteAddr: string,
+	csrfBinding?: string,
+): CoreRequest {
 	return {
 		method: ctx.request.method(),
 		path: ctx.request.path(),
@@ -260,6 +303,10 @@ function coreRequest(ctx: ReamContext, remoteAddr: string): CoreRequest {
 		body: csrfBodyString(ctx.request.body()),
 		remoteAddr,
 		protocol: ctx.request.protocol?.(),
+		host: ctx.request.host?.() ?? undefined,
+		csrfBinding,
+		routePattern: ctx.route?.pattern,
+		context: ctx,
 	};
 }
 
@@ -296,12 +343,16 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 		if (await guard(ctx, bh, ["rateLimit"])) return;
 	}
 
-	const outcome = runCsrfPhase(bh, coreRequest(ctx, ""));
+	const outcome = runCsrfPhase(
+		bh,
+		coreRequest(ctx, "", sessionCsrfBinding(ctx)),
+	);
 	if (outcome.kind === "reject") {
 		applySecurityHeaders(ctx, bh);
-		if (handleCsrfRejectionForBrowser(ctx, outcome.body)) return;
+		const body = translateCsrfRejection(ctx, outcome.body);
+		if (handleCsrfRejectionForBrowser(ctx, body)) return;
 		ctx.response.status(outcome.status);
-		ctx.response.json(outcome.body);
+		ctx.response.json(body);
 		return;
 	}
 
@@ -348,8 +399,13 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 		contentType: ctx.response.getHeader("content-type") ?? "",
 		cspNonce: outcome.cspNonce,
 	});
+	// Set before the handler ran; added again only where the response lost
+	// one. A route that set its own (a page framed by a partner, a CSP of its
+	// own) keeps it — overwriting it after the fact left no way to.
 	for (const [name, value] of Object.entries(headers)) {
-		ctx.response.header(name, value);
+		if (ctx.response.getHeader(name) === undefined) {
+			ctx.response.header(name, value);
+		}
 	}
 	if (body !== ctx.response.getBody()) ctx.response.setBody(body);
 }
@@ -387,13 +443,45 @@ function isBadCsrfBody(body: unknown): boolean {
 	return isRecord(error) && error.code === "E_BAD_CSRF_TOKEN";
 }
 
+/** The translation key of the CSRF rejection message. */
+const CSRF_MESSAGE_IDENTIFIER = "errors.E_BAD_CSRF_TOKEN";
+
 /**
- * Turn a CSRF rejection into what `@adonisjs/shield` does for a browser: flash
+ * The CSRF rejection with its message translated, when the request carries a
+ * translator (`ctx.i18n.t(key, data, fallback)`) — the English message
+ * otherwise, and anything that is not a CSRF token rejection unchanged.
+ */
+function translateCsrfRejection(ctx: ReamContext, body: unknown): unknown {
+	if (!isBadCsrfBody(body) || !isRecord(body) || !isRecord(body.error)) {
+		return body;
+	}
+	const fallback =
+		typeof body.error.message === "string"
+			? body.error.message
+			: "Invalid or expired CSRF token";
+	const i18n: unknown = Reflect.get(Object(ctx), "i18n");
+	const t: unknown = isRecord(i18n) ? i18n.t : undefined;
+	if (!isRecord(i18n) || typeof t !== "function") return body;
+	const translated: unknown = Reflect.apply(t, i18n, [
+		CSRF_MESSAGE_IDENTIFIER,
+		{},
+		fallback,
+	]);
+	const message = typeof translated === "string" ? translated : fallback;
+	return { ...body, error: { ...body.error, message } };
+}
+
+/**
+ * Turn a CSRF rejection into a flash and a redirect back for a browser: flash
  * the submitted form back (minus the token, the method override and any
  * password), flash the message, and redirect to the previous page.
  *
- * A JSON client still gets the JSON body — Shield's own handler only takes the
- * redirect path for a session-backed request.
+ * An Inertia visit (`X-Inertia`) takes the same redirect — its client follows
+ * it and shows the flashed error — but does not re-flash the form: Inertia
+ * keeps the form's state on the client.
+ *
+ * A JSON client still gets the JSON body: redirecting a fetch or an XHR would
+ * swallow the failure.
  *
  * Returns whether it handled the response. Everything it needs is duck-typed:
  * blackhole does not depend on a session or a redirect builder existing, and a
@@ -405,10 +493,11 @@ function handleCsrfRejectionForBrowser(
 ): boolean {
 	if (!isBadCsrfBody(body)) return false;
 
+	const inertia = Boolean(ctx.request.header("x-inertia"));
 	const accept = ctx.request.header("accept") ?? "";
 	// An explicit JSON request, an XHR, or a client that never asked for HTML
 	// gets the JSON body — redirecting those would swallow the failure.
-	if (!accept.includes("text/html")) return false;
+	if (!inertia && !accept.includes("text/html")) return false;
 
 	const session = Reflect.get(Object(ctx), "session");
 	const redirect = Reflect.get(Object(ctx.response), "redirect");
@@ -421,7 +510,7 @@ function handleCsrfRejectionForBrowser(
 			? body.error.message
 			: undefined) ?? "Invalid or expired CSRF token";
 
-	callIfFunction(session, "flashExcept", CSRF_FLASH_EXCEPT);
+	if (!inertia) callIfFunction(session, "flashExcept", CSRF_FLASH_EXCEPT);
 	callIfFunction(session, "flash", "error", message);
 	callIfFunction(session, "flashErrors", { E_BAD_CSRF_TOKEN: message });
 

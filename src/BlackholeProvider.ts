@@ -10,7 +10,13 @@
  *   providers: [() => import('@c9up/blackhole/provider')]
  */
 import type { BlackholeConfig } from "./config.js";
-import { type BlackholeOptions, createBlackhole } from "./index.js";
+import {
+	assertNoRetiredOptions,
+	type BlackholeOptions,
+	createBlackhole,
+} from "./index.js";
+import { LimiterManager, limiterStores } from "./limiter.js";
+import { clearLimiter, setLimiter } from "./services/limiter.js";
 
 interface BlackholeContainer {
 	singleton(token: unknown, factory: () => unknown): void;
@@ -26,6 +32,9 @@ export interface BlackholeAppContext {
 }
 
 export const BLACKHOLE_KEY = "blackhole";
+
+/** The container binding of the {@link LimiterManager} (`limiter.define`…). */
+export const BLACKHOLE_LIMITER_KEY = "blackhole.limiter";
 
 /**
  * The rate-limit options `createBlackhole` takes, with the configured store
@@ -68,18 +77,41 @@ function resolveRateLimit(
 }
 
 export default class BlackholeProvider {
+	#limiter: LimiterManager | undefined;
+
 	constructor(protected app: BlackholeAppContext) {}
 
 	register() {
+		// The per-route limits: `limiter` in the config, or one memory store.
+		// Seated now, so `@c9up/blackhole/services/limiter` counts in the
+		// configured store from the first throttled request.
+		const limiterConfig = this.app.config.get<BlackholeConfig>("blackhole")
+			?.limiter ?? {
+			default: "memory",
+			stores: { memory: limiterStores.memory() },
+		};
+		const limiter = new LimiterManager(limiterConfig);
+		this.#limiter = limiter;
+		setLimiter(limiter);
+		this.app.container.singleton(BLACKHOLE_LIMITER_KEY, () => limiter);
+
 		this.app.container.singleton(BLACKHOLE_KEY, () => {
 			const config = this.app.config.get<BlackholeConfig>("blackhole") ?? {};
+			// Checked on the config itself: the options below are picked key by
+			// key, so a retired key would otherwise just never be read.
+			assertNoRetiredOptions(config);
 			return createBlackhole({
 				xss: config.xss,
 				csrf: config.csrf,
 				rateLimit: resolveRateLimit(config.rateLimit),
 				pathTraversal: config.pathTraversal,
 				paramPollution: config.paramPollution,
-				securityHeaders: config.securityHeaders,
+				xFrame: config.xFrame,
+				hsts: config.hsts,
+				contentTypeSniffing: config.contentTypeSniffing,
+				csp: config.csp,
+				referrerPolicy: config.referrerPolicy,
+				permissionsPolicy: config.permissionsPolicy,
 				cors: config.cors,
 				// Sign CSRF tokens with the app secret. Fall back to APP_KEY so the
 				// common case (no explicit `secret` in config/blackhole.ts) still
@@ -88,5 +120,9 @@ export default class BlackholeProvider {
 				secret: config.secret ?? process.env.APP_KEY,
 			});
 		});
+	}
+
+	shutdown() {
+		if (this.#limiter) clearLimiter(this.#limiter);
 	}
 }

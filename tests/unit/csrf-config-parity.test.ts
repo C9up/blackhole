@@ -43,7 +43,9 @@ describe("blackhole > exceptRoutes as a predicate", () => {
 	it("exempts what the predicate says", () => {
 		const bh = createBlackhole({
 			secret: "x".repeat(32),
-			csrf: { exceptRoutes: (req) => req.path.startsWith("/webhooks/") },
+			csrf: {
+				exceptRoutes: (ctx) => ctx.request.url().startsWith("/webhooks/"),
+			},
 		});
 		const exempt = runRequestPhase(bh, request("/webhooks/stripe"));
 		expect(exempt.kind).toBe("pass");
@@ -54,7 +56,9 @@ describe("blackhole > exceptRoutes as a predicate", () => {
 	it("still guards everything else", () => {
 		const bh = createBlackhole({
 			secret: "x".repeat(32),
-			csrf: { exceptRoutes: (req) => req.path.startsWith("/webhooks/") },
+			csrf: {
+				exceptRoutes: (ctx) => ctx.request.url().startsWith("/webhooks/"),
+			},
 		});
 		// A POST with no token, on a guarded path, is rejected.
 		expect(runRequestPhase(bh, request("/posts")).kind).toBe("reject");

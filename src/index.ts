@@ -18,6 +18,8 @@
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { clientKey } from "./clientKey.js";
+import { durationToSeconds } from "./duration.js";
 import { loadNativeBinary } from "./vendor/nativeBinary.js";
 import { inProduction } from "./vendor/nodeEnv.js";
 
@@ -52,64 +54,113 @@ type NativeModule = typeof import("./native/generated.js");
 const attempt = loadNativeBinary<NativeModule>();
 const native = attempt.loaded ? attempt.binary : undefined;
 
-/** Protective HTTP response headers (Helmet-style). */
-export interface SecurityHeadersConfig {
-	/** `X-Content-Type-Options: nosniff` (default: true). */
-	contentTypeOptions?: boolean;
-	/** `X-Frame-Options` (default: `SAMEORIGIN`; `false` to omit). */
-	frameOptions?: "DENY" | "SAMEORIGIN" | false;
-	/** `Strict-Transport-Security` (default: 180d + subdomains; `false` to omit). */
-	hsts?:
-		| { maxAge: number; includeSubDomains?: boolean; preload?: boolean }
-		| false;
-	/**
-	 * `Content-Security-Policy` (default: a hardened baseline — see
-	 * {@link SECURITY_HEADERS_DEFAULTS}; `false` to omit). Include the `@nonce`
-	 * token (AdonisJS-style) and it's replaced per-request with `'nonce-<random>'`;
-	 * the raw nonce is exposed as `ctx.response.nonce` (and `ctx.store` `cspNonce`)
-	 * for `<script nonce="…">`. e.g. `"default-src 'self'; script-src 'self' @nonce"`.
-	 *
-	 * CSP keywords MUST be single-quoted (`'self'`, `'none'`, `'unsafe-inline'`,
-	 * `'strict-dynamic'`, …). An unquoted keyword is parsed by the browser as a
-	 * host literal and silently breaks the policy — blackhole warns when it spots one.
-	 *
-	 * Also accepts a structured object (parity with `@adonisjs/shield`):
-	 * `csp: { directives: { 'script-src': ["'self'", '@nonce'] }, reportOnly: true }`.
-	 * `directives` are serialized to the header string; `useDefaults` (default
-	 * `true`) merges a Helmet-style hardened baseline under your directives.
-	 */
-	csp?: string | CspConfig | false;
-	/**
-	 * Emit the CSP as `Content-Security-Policy-Report-Only` instead of enforcing
-	 * it (default: false). Lets a team observe violations before switching a
-	 * strict policy on — pair with a `report-to`/`report-uri` directive in `csp`.
-	 * A `csp` object's own `reportOnly` also toggles this (object wins when set).
-	 */
-	cspReportOnly?: boolean;
-	/** `Referrer-Policy` (default: `strict-origin-when-cross-origin`). */
-	referrerPolicy?: string;
-	/** `Permissions-Policy` (default: camera/mic/geolocation denied). */
-	permissionsPolicy?: string;
+/** `X-Frame-Options`: who may frame the pages. */
+export interface XFrameConfig {
+	/** Default: true once the object is given. */
+	enabled?: boolean;
+	/** Default: `SAMEORIGIN`. `ALLOW-FROM` needs `domain`. */
+	action?: "DENY" | "SAMEORIGIN" | "ALLOW-FROM";
+	/** The origin `ALLOW-FROM` names. */
+	domain?: string;
+}
+
+/** `Strict-Transport-Security`: HTTPS only, for `maxAge`. */
+export interface HstsConfig {
+	/** Default: true once the object is given. */
+	enabled?: boolean;
+	/** Seconds, or a duration string (`'180 days'`). Default: 180 days. `0` clears the policy. */
+	maxAge?: number | string;
+	includeSubDomains?: boolean;
+	preload?: boolean;
+}
+
+/** `X-Content-Type-Options: nosniff`. */
+export interface ContentTypeSniffingConfig {
+	/** Default: true once the object is given. */
+	enabled?: boolean;
 }
 
 /**
- * Structured Content-Security-Policy (parity with `@adonisjs/shield`). Prefer
- * this over the raw string when composing a policy from parts — the `directives`
- * map is serialized to the header value for you.
+ * `Content-Security-Policy`.
+ *
+ * `directives` names each directive in camelCase (`scriptSrc`) or dashed
+ * (`script-src`); they are validated and serialized for you, with a hardened
+ * baseline merged under them unless `useDefaults: false`. `policy` takes the
+ * header value as a ready-made string instead (validated too). Neither: the
+ * default policy below.
+ *
+ * Either way, the `@nonce` token is replaced per request with
+ * `'nonce-<random>'`, and the raw nonce is exposed as `ctx.response.nonce` (and
+ * `ctx.store` `cspNonce`) for `<script nonce="…">`.
+ *
+ * CSP keywords MUST be single-quoted (`'self'`, `'none'`, `'unsafe-inline'`,
+ * `'strict-dynamic'`, `'nonce-…'`, `'sha256-…'`, …). An unquoted keyword is
+ * parsed by the browser as a host literal and silently breaks the policy, so
+ * `createBlackhole` throws on one — as on a directive given twice.
  */
 export interface CspConfig {
+	/** Default: true once the object is given. */
+	enabled?: boolean;
 	/**
-	 * Merge the Helmet-style hardened baseline ({@link CSP_DIRECTIVE_DEFAULTS})
-	 * under your `directives` (yours win per directive). Default: `true`.
+	 * Directive → source list, e.g. `{ scriptSrc: ["'self'", '@nonce'] }`. A
+	 * camelCase name is written dashed (`script-src`). `null` drops a directive
+	 * the baseline supplies; `default-src` takes
+	 * {@link dangerouslyDisableDefaultSrc} instead.
 	 */
-	useDefaults?: boolean;
-	/** Directive → source list, e.g. `{ 'script-src': ["'self'", '@nonce'] }`. */
 	directives?: Record<
 		string,
-		string[] | null | typeof dangerouslyDisableDefaultSrc
+		string | string[] | null | typeof dangerouslyDisableDefaultSrc
 	>;
-	/** Emit `Content-Security-Policy-Report-Only` instead of enforcing (default: false). */
+	/**
+	 * Merge the hardened baseline ({@link getDefaultDirectives}) under
+	 * `directives` (yours win per directive). Default: `true`.
+	 */
+	useDefaults?: boolean;
+	/** The whole policy as a header string — instead of `directives`. */
+	policy?: string;
+	/**
+	 * Emit `Content-Security-Policy-Report-Only` instead of enforcing
+	 * (default: false) — to watch violations before enforcing a strict policy.
+	 */
 	reportOnly?: boolean;
+}
+
+/** `Referrer-Policy`. */
+export interface ReferrerPolicyConfig {
+	/** Default: true once the object is given. */
+	enabled?: boolean;
+	/** Default: `strict-origin-when-cross-origin`. */
+	policy?: string;
+}
+
+/** `Permissions-Policy`. */
+export interface PermissionsPolicyConfig {
+	/** Default: true once the object is given. */
+	enabled?: boolean;
+	/** Default: `camera=(), microphone=(), geolocation=()`. */
+	policy?: string;
+}
+
+/**
+ * The protective response headers, one key each.
+ *
+ * Every one is ON with a hardened default when its key is omitted — turn one
+ * off with `{ enabled: false }`. `referrerPolicy` and `permissionsPolicy` are
+ * blackhole's own additions to the set.
+ */
+export interface SecurityHeadersOptions {
+	/** `X-Frame-Options` (default: `SAMEORIGIN`). */
+	xFrame?: XFrameConfig;
+	/** `Strict-Transport-Security` (default: 180 days, subdomains included). */
+	hsts?: HstsConfig;
+	/** `X-Content-Type-Options: nosniff` (default: on). */
+	contentTypeSniffing?: ContentTypeSniffingConfig;
+	/** `Content-Security-Policy` (default: the policy in {@link DEFAULT_CSP_POLICY}). */
+	csp?: CspConfig;
+	/** `Referrer-Policy` (default: `strict-origin-when-cross-origin`). */
+	referrerPolicy?: ReferrerPolicyConfig;
+	/** `Permissions-Policy` (default: camera, microphone and geolocation denied). */
+	permissionsPolicy?: PermissionsPolicyConfig;
 }
 
 /**
@@ -160,138 +211,387 @@ const CSP_DIRECTIVE_DEFAULTS: Record<string, string[]> = {
 	"upgrade-insecure-requests": [],
 };
 
+/** Keywords the browser honours only single-quoted; bare, each is a host name. */
+const CSP_QUOTED_KEYWORDS = new Set([
+	"none",
+	"self",
+	"strict-dynamic",
+	"report-sample",
+	"inline-speculation-rules",
+	"unsafe-inline",
+	"unsafe-eval",
+	"unsafe-hashes",
+	"wasm-unsafe-eval",
+]);
+
+/** `scriptSrc` → `script-src`. A dashed name is left as written. */
+function dashify(name: string): string {
+	return name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
+}
+
 /**
- * Drop the directives marked for removal, leaving a plain source map.
- *
- * `null` and {@link dangerouslyDisableDefaultSrc} both mean "this directive
- * must not be emitted" — the second only reads better at the call site for the
- * one directive whose absence actually matters.
+ * Refuse a source that would break or widen the policy without a sound: a `;`
+ * or `,` (which ends the directive, or starts another policy, inside the
+ * header), or a keyword, nonce or hash left unquoted.
  */
-function dropMarkedDirectives(
-	directives: Record<
-		string,
-		string[] | null | typeof dangerouslyDisableDefaultSrc
-	>,
-): Record<string, string[]> {
-	const out: Record<string, string[]> = {};
-	for (const [name, sources] of Object.entries(directives)) {
-		if (sources === null || sources === dangerouslyDisableDefaultSrc) continue;
-		out[name] = sources;
+function assertCspSource(directive: string, source: string): void {
+	if (/[;,\r\n]/.test(source)) {
+		throw new Error(
+			`[blackhole] Content-Security-Policy: invalid value for ${JSON.stringify(directive)}: ${JSON.stringify(source)}.`,
+		);
 	}
-	return out;
+	if (
+		CSP_QUOTED_KEYWORDS.has(source.toLowerCase()) ||
+		/^(?:nonce|sha256|sha384|sha512)-/i.test(source)
+	) {
+		throw new Error(
+			`[blackhole] Content-Security-Policy: ${JSON.stringify(source)} in ${JSON.stringify(directive)} must be single-quoted ('${source}'). Unquoted, the browser reads it as a host name and the directive silently stops meaning what it says.`,
+		);
+	}
+}
+
+/** Refuse a directive name that is not one. */
+function assertCspDirectiveName(name: string): void {
+	if (name.length === 0 || /[^a-zA-Z0-9-]/.test(name)) {
+		throw new Error(
+			`[blackhole] Content-Security-Policy: invalid directive name ${JSON.stringify(name)}.`,
+		);
+	}
+}
+
+/**
+ * The object form of the CSP, validated and resolved to an ordered directive
+ * map: names dashed, the baseline merged under the caller's directives (unless
+ * `useDefaults: false`), the ones marked for removal dropped.
+ *
+ * Throws on what would otherwise reach the browser broken: an invalid or
+ * repeated name, an unquoted keyword, a `;` inside a value, a `default-src`
+ * set to `null`, a policy left without directives or without `default-src`.
+ */
+function resolveCspDirectives(config: CspConfig): Map<string, string[]> {
+	const own = new Map<string, string[]>();
+	const disabled = new Set<string>();
+	for (const [rawName, rawValue] of Object.entries(config.directives ?? {})) {
+		assertCspDirectiveName(rawName);
+		const name = dashify(rawName);
+		if (own.has(name) || disabled.has(name)) {
+			throw new Error(
+				`[blackhole] Content-Security-Policy: directive ${JSON.stringify(name)} is given twice.`,
+			);
+		}
+		if (rawValue === null) {
+			if (name === "default-src") {
+				throw new Error(
+					"[blackhole] Content-Security-Policy: `default-src` cannot be `null` — every fetch directive you did not set falls back to it. To remove it anyway, set it to `dangerouslyDisableDefaultSrc`.",
+				);
+			}
+			disabled.add(name);
+			continue;
+		}
+		if (rawValue === dangerouslyDisableDefaultSrc) {
+			if (name !== "default-src") {
+				throw new Error(
+					`[blackhole] Content-Security-Policy: \`dangerouslyDisableDefaultSrc\` only applies to \`default-src\`; to drop ${JSON.stringify(name)}, set it to \`null\`.`,
+				);
+			}
+			disabled.add(name);
+			continue;
+		}
+		const sources = typeof rawValue === "string" ? [rawValue] : rawValue;
+		if (!Array.isArray(sources)) {
+			throw new Error(
+				`[blackhole] Content-Security-Policy: invalid value for ${JSON.stringify(name)}.`,
+			);
+		}
+		for (const source of sources) assertCspSource(name, source);
+		own.set(name, sources);
+	}
+
+	const merged = new Map<string, string[]>();
+	if (config.useDefaults !== false) {
+		// The baseline's order first, each overridden by the caller's value.
+		for (const [name, sources] of Object.entries(CSP_DIRECTIVE_DEFAULTS)) {
+			if (disabled.has(name)) continue;
+			merged.set(name, own.get(name) ?? [...sources]);
+		}
+	}
+	for (const [name, sources] of own) {
+		if (!merged.has(name)) merged.set(name, sources);
+	}
+
+	if (merged.size === 0) {
+		throw new Error(
+			"[blackhole] Content-Security-Policy has no directives. Set some, or turn the header off with `csp: false`.",
+		);
+	}
+	if (!merged.has("default-src") && !disabled.has("default-src")) {
+		throw new Error(
+			"[blackhole] Content-Security-Policy needs a `default-src`. To go without one anyway, set it to `dangerouslyDisableDefaultSrc`.",
+		);
+	}
+	return merged;
+}
+
+/**
+ * Validate a CSP given as a header string: each directive named once, no
+ * keyword, nonce or hash left unquoted. Its `;` are the separators, so the
+ * value rule of the object form cannot apply — control characters still
+ * cannot.
+ */
+function assertCspString(csp: string): void {
+	if (/[\r\n]/.test(csp)) {
+		throw new Error(
+			"[blackhole] Content-Security-Policy: the policy string contains a line break.",
+		);
+	}
+	const seen = new Set<string>();
+	for (const directive of csp.split(";")) {
+		const [name, ...sources] = directive.trim().split(/\s+/);
+		if (name === undefined || name.length === 0) continue;
+		assertCspDirectiveName(name);
+		const lowered = name.toLowerCase();
+		if (seen.has(lowered)) {
+			throw new Error(
+				`[blackhole] Content-Security-Policy: directive ${JSON.stringify(lowered)} is given twice; the browser ignores the second.`,
+			);
+		}
+		seen.add(lowered);
+		for (const source of sources) {
+			if (source !== "@nonce") assertCspSource(lowered, source);
+		}
+	}
 }
 
 /** Serialize a CSP directive map to a header string (`a 'self'; b; c x y`). */
-function serializeCspDirectives(directives: Record<string, string[]>): string {
-	return Object.entries(directives)
+function serializeCspDirectives(directives: Map<string, string[]>): string {
+	return [...directives]
 		.map(([name, sources]) =>
 			sources.length > 0 ? `${name} ${sources.join(" ")}` : name,
 		)
 		.join("; ");
 }
 
-const SECURITY_HEADERS_DEFAULTS: SecurityHeadersConfig = {
-	contentTypeOptions: true,
-	frameOptions: "SAMEORIGIN",
-	hsts: { maxAge: 15552000, includeSubDomains: true },
-	// Hardened baseline: `base-uri` and `form-action` do NOT fall back to
-	// `default-src` per the CSP spec, so they must be set explicitly — otherwise
-	// an injected `<base href>` re-roots relative asset/script URLs and an
-	// injected `<form>` can POST credentials off-origin. `object-src 'none'`
-	// kills legacy plugin vectors (helmet hardens it the same way).
-	// `script-src` is spelled out rather than left to fall back on `default-src`,
-	// and it names `@nonce`. Without it the default policy forbids EVERY inline
-	// script, which is what a server-rendered page emits to hydrate itself: the
-	// page then renders and silently never comes alive. AdonisJS sidesteps this
-	// by shipping its CSP disabled; a policy that works is worth more than one
-	// that has to be turned off.
-	//
-	// `@nonce` is substituted per request, and the value is handed to the view
-	// layer (`response.nonce`) so it can stamp its own inline scripts.
-	csp: "default-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; script-src 'self' @nonce",
-	referrerPolicy: "strict-origin-when-cross-origin",
-	permissionsPolicy: "camera=(), microphone=(), geolocation=()",
+/**
+ * The CSP when the config names none.
+ *
+ * `base-uri` and `form-action` do NOT fall back to `default-src` per the CSP
+ * spec, so they are set explicitly — otherwise an injected `<base href>`
+ * re-roots relative asset/script URLs and an injected `<form>` can POST
+ * credentials off-origin. `object-src 'none'` kills legacy plugin vectors.
+ * `script-src` is spelled out rather than left to fall back on `default-src`,
+ * and it names `@nonce`: without it the policy forbids EVERY inline script,
+ * which is what a server-rendered page emits to hydrate itself, and the page
+ * renders and silently never comes alive. A policy that works is worth more
+ * than one that ships disabled.
+ */
+export const DEFAULT_CSP_POLICY =
+	"default-src 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; script-src 'self' @nonce";
+
+const DEFAULT_HSTS_MAX_AGE = 180 * 24 * 60 * 60;
+
+/** The keys each header's object takes. */
+const SECURITY_HEADER_KEYS: Record<keyof SecurityHeadersOptions, string[]> = {
+	xFrame: ["enabled", "action", "domain"],
+	hsts: ["enabled", "maxAge", "includeSubDomains", "preload"],
+	contentTypeSniffing: ["enabled"],
+	csp: ["enabled", "directives", "useDefaults", "policy", "reportOnly"],
+	referrerPolicy: ["enabled", "policy"],
+	permissionsPolicy: ["enabled", "policy"],
 };
 
-/** CSP source keywords that MUST be single-quoted to be honoured by the browser. */
-const CSP_KEYWORDS =
-	/(?:^|\s)(self|none|unsafe-inline|unsafe-eval|unsafe-hashes|strict-dynamic|report-sample)(?:\s|;|$)/;
+const SECURITY_HEADER_NAMES: Array<keyof SecurityHeadersOptions> = [
+	"xFrame",
+	"hsts",
+	"contentTypeSniffing",
+	"csp",
+	"referrerPolicy",
+	"permissionsPolicy",
+];
 
-/** Warn (once, non-fatal) when a CSP keyword is used unquoted — a silent policy break. */
-function warnUnquotedCspKeywords(csp: string): void {
-	// Strip the substitutable @nonce token first, then flag bare keywords.
-	if (CSP_KEYWORDS.test(csp.replaceAll("@nonce", ""))) {
-		process.stderr.write(
-			"[blackhole] WARNING: your CSP contains an UNQUOTED keyword (e.g. `self` instead " +
-				"of `'self'`). Browsers parse an unquoted keyword as a host name, silently " +
-				"breaking the directive. Single-quote every CSP keyword.\n",
-		);
+/** Options that no longer exist, and what replaced them. */
+const RETIRED_OPTIONS: Record<string, string> = {
+	securityHeaders:
+		"the protective headers are configured one key each, at the top level: " +
+		"`xFrame`, `hsts`, `contentTypeSniffing`, `csp`, `referrerPolicy` and " +
+		"`permissionsPolicy`, each `{ enabled, ... }`",
+};
+
+/**
+ * Refuse an option that was renamed or moved: read silently as nothing, it
+ * would leave the app without the header it configured.
+ */
+export function assertNoRetiredOptions(options: object): void {
+	for (const [key, replacement] of Object.entries(RETIRED_OPTIONS)) {
+		if (Object.hasOwn(options, key)) {
+			throw new Error(
+				`[blackhole] \`${key}\` is no longer an option: ${replacement}.`,
+			);
+		}
 	}
 }
 
-/** Compute the protective response headers from config (empty when disabled). */
-function computeSecurityHeaders(
-	config: SecurityHeadersConfig | false | undefined,
-): Record<string, string> {
-	if (config === false) return {};
-	const c = { ...SECURITY_HEADERS_DEFAULTS, ...config };
-	const headers: Record<string, string> = { "x-xss-protection": "0" };
-	if (c.contentTypeOptions) headers["x-content-type-options"] = "nosniff";
-	if (c.frameOptions) headers["x-frame-options"] = c.frameOptions;
-	if (c.hsts) {
-		// A negative / zero max-age silently DISABLES HSTS (`max-age=0` tells the
-		// browser to forget the policy) — reject it loudly like Shield does.
-		if (!Number.isFinite(c.hsts.maxAge) || c.hsts.maxAge < 0) {
+/** Refuse a key a header's object does not take — a typo would drop its setting. */
+function assertHeaderKeys(
+	name: keyof SecurityHeadersOptions,
+	value: object,
+): void {
+	const known = SECURITY_HEADER_KEYS[name];
+	for (const key of Object.keys(value)) {
+		if (!known.includes(key)) {
 			throw new Error(
-				`[blackhole] Invalid HSTS maxAge ${c.hsts.maxAge}: must be a non-negative number of seconds.`,
+				`[blackhole] \`${name}\` has no option "${key}". Known: ${known.join(", ")}.`,
 			);
 		}
-		let v = `max-age=${c.hsts.maxAge}`;
-		if (c.hsts.includeSubDomains) v += "; includeSubDomains";
-		if (c.hsts.preload) v += "; preload";
-		headers["strict-transport-security"] = v;
 	}
-	if (c.csp) {
-		let cspString: string;
-		let reportOnly = c.cspReportOnly ?? false;
-		if (typeof c.csp === "string") {
-			cspString = c.csp;
-		} else {
-			// Object form: merge the hardened baseline under the caller's
-			// directives (unless useDefaults=false), then serialize to a string.
-			const merged =
-				c.csp.useDefaults === false
-					? { ...(c.csp.directives ?? {}) }
-					: { ...CSP_DIRECTIVE_DEFAULTS, ...(c.csp.directives ?? {}) };
-			cspString = serializeCspDirectives(dropMarkedDirectives(merged));
-			// The object's own reportOnly wins over the legacy top-level flag.
-			if (c.csp.reportOnly !== undefined) reportOnly = c.csp.reportOnly;
+}
+
+/** Whether a header is on: omitted means on, as does an object without `enabled`. */
+function isOn(value: { enabled?: boolean } | undefined): boolean {
+	return value?.enabled !== false;
+}
+
+/** Compute the protective response headers from config. */
+function computeSecurityHeaders(
+	options: SecurityHeadersOptions,
+): Record<string, string> {
+	for (const name of SECURITY_HEADER_NAMES) {
+		const value = options[name];
+		if (value !== undefined) assertHeaderKeys(name, value);
+	}
+	const {
+		xFrame,
+		hsts,
+		contentTypeSniffing,
+		csp,
+		referrerPolicy,
+		permissionsPolicy,
+	} = options;
+	const headers: Record<string, string> = { "x-xss-protection": "0" };
+
+	if (isOn(contentTypeSniffing)) headers["x-content-type-options"] = "nosniff";
+
+	if (isOn(xFrame)) {
+		const action = xFrame?.action ?? "SAMEORIGIN";
+		if (!["DENY", "SAMEORIGIN", "ALLOW-FROM"].includes(action)) {
+			throw new Error(
+				`[blackhole] xFrame.action must be DENY, SAMEORIGIN or ALLOW-FROM, got ${JSON.stringify(action)}.`,
+			);
 		}
-		warnUnquotedCspKeywords(cspString);
-		const cspHeader = reportOnly
-			? "content-security-policy-report-only"
-			: "content-security-policy";
-		headers[cspHeader] = cspString;
+		if (action === "ALLOW-FROM" && !xFrame?.domain) {
+			throw new Error("[blackhole] xFrame.action ALLOW-FROM needs a `domain`.");
+		}
+		headers["x-frame-options"] =
+			action === "ALLOW-FROM" ? `ALLOW-FROM ${xFrame?.domain}` : action;
 	}
-	if (c.referrerPolicy) headers["referrer-policy"] = c.referrerPolicy;
-	if (c.permissionsPolicy) headers["permissions-policy"] = c.permissionsPolicy;
+
+	if (isOn(hsts)) {
+		// Seconds or a duration string. A negative or unreadable value is
+		// refused; zero is valid — `max-age=0` is how a site tells browsers to
+		// drop the HSTS policy they hold.
+		const maxAge =
+			hsts?.maxAge === undefined
+				? DEFAULT_HSTS_MAX_AGE
+				: durationToSeconds(hsts.maxAge, "an HSTS maxAge");
+		// Omitted entirely, the default covers subdomains; an `hsts` object says
+		// for itself.
+		const subdomains = hsts === undefined ? true : hsts.includeSubDomains;
+		let value = `max-age=${maxAge}`;
+		if (subdomains) value += "; includeSubDomains";
+		if (hsts?.preload) value += "; preload";
+		headers["strict-transport-security"] = value;
+	}
+
+	if (isOn(csp)) {
+		if (csp?.policy !== undefined && csp.directives !== undefined) {
+			throw new Error(
+				"[blackhole] csp takes `directives` or `policy`, not both.",
+			);
+		}
+		const value =
+			csp?.policy ??
+			(csp?.directives !== undefined
+				? serializeCspDirectives(resolveCspDirectives(csp))
+				: DEFAULT_CSP_POLICY);
+		assertCspString(value);
+		headers[
+			csp?.reportOnly
+				? "content-security-policy-report-only"
+				: "content-security-policy"
+		] = value;
+	}
+
+	if (isOn(referrerPolicy)) {
+		headers["referrer-policy"] =
+			referrerPolicy?.policy ?? "strict-origin-when-cross-origin";
+	}
+	if (isOn(permissionsPolicy)) {
+		headers["permissions-policy"] =
+			permissionsPolicy?.policy ?? "camera=(), microphone=(), geolocation=()";
+	}
 	return headers;
 }
 
+/**
+ * The request context a config callback receives (`csrf.exceptRoutes`,
+ * `cors.origin`, `cors.headers`, `cors.enabled`).
+ *
+ * Under Ream it is the HTTP context itself — `ctx.request`, `ctx.route`,
+ * `ctx.auth` and the rest are all there. The standalone adapters have no such
+ * object and pass this much: the method, the path, the headers and, where the
+ * framework has matched one, the route pattern.
+ */
+export interface BlackholeContext {
+	request: {
+		method(): string;
+		/** The request path, without the query string. */
+		url(): string;
+		header(name: string): string | undefined;
+	};
+	/** The matched route, when the host has matched one by then. */
+	route?: { pattern: string } | null;
+}
+
+/** What `origin` (or what an `origin` callback returns) allows. */
+export type CorsOriginValue = boolean | string | string[];
+
+/** What `headers` (or what a `headers` callback returns) allows. */
+export type CorsHeadersValue = boolean | string | string[];
+
 /** Cross-Origin Resource Sharing policy. */
 export interface CorsConfig {
-	/** Allowed origin(s). `true`/`'*'` = any (forbidden with credentials), a string/array = allow-list, or a predicate. */
-	origin: string | string[] | boolean | ((origin: string) => boolean);
+	/**
+	 * Whether CORS headers are handled at all (default: true). A function
+	 * decides per request.
+	 */
+	enabled?: boolean | ((ctx: BlackholeContext) => boolean);
+	/**
+	 * Allowed origin(s): `true` reflects any origin, `'*'` answers the literal
+	 * wildcard, `false` allows none, a string (comma-separated) or an array is
+	 * an allow-list, and a function decides per request — returning any of
+	 * those. `true` and `'*'` are refused together with `credentials: true`:
+	 * that would hand every site the user's cookies.
+	 */
+	origin:
+		| CorsOriginValue
+		| ((origin: string, ctx: BlackholeContext) => CorsOriginValue);
+	/** Methods a preflight may ask for (default: GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS). */
 	methods?: string[];
 	/**
-	 * Allowed request headers for preflight. An array is an allow-list (a
-	 * preflight requesting a header outside it is refused); `true` reflects
-	 * whatever the browser sends in `Access-Control-Request-Headers`. Defaults to
-	 * a common allow-list when omitted.
+	 * Request headers a preflight may ask for: `true` reflects what the browser
+	 * asks for, `false` allows none, a string (comma-separated) or an array is
+	 * an allow-list, a function decides per request. A preflight asking for a
+	 * header outside it is refused. Default: a common allow-list.
 	 */
-	headers?: string[] | true;
+	headers?:
+		| CorsHeadersValue
+		| ((headers: string[], ctx: BlackholeContext) => CorsHeadersValue);
+	/** Response headers the browser may expose to the page (`Access-Control-Expose-Headers`). */
+	exposeHeaders?: string[];
+	/** Same as {@link exposeHeaders}; accepted under either name. */
 	exposedHeaders?: string[];
+	/** Send `Access-Control-Allow-Credentials: true`. */
 	credentials?: boolean;
+	/** Seconds a browser may cache a preflight answer. */
 	maxAge?: number;
 }
 
@@ -302,8 +602,30 @@ export interface CorsResult {
 	preflight: boolean;
 }
 
-/** Validate a CORS config (throws on the credential-leak combinations). */
+const CORS_KEYS = new Set([
+	"enabled",
+	"origin",
+	"methods",
+	"headers",
+	"exposeHeaders",
+	"exposedHeaders",
+	"credentials",
+	"maxAge",
+]);
+
+/**
+ * Validate a CORS config: no unknown key (a misspelled one would otherwise
+ * drop its setting without a word), and none of the credential-leak
+ * combinations.
+ */
 function validateCors(cfg: CorsConfig): void {
+	for (const key of Object.keys(cfg)) {
+		if (!CORS_KEYS.has(key)) {
+			throw new Error(
+				`CORS misconfiguration: unknown option "${key}". Known options: ${[...CORS_KEYS].join(", ")}.`,
+			);
+		}
+	}
 	if (cfg.credentials === true && (cfg.origin === "*" || cfg.origin === true)) {
 		throw new Error(
 			'CORS misconfiguration: origin="*" (or true) cannot be combined with credentials=true. Pin to an explicit origin list.',
@@ -320,31 +642,49 @@ function validateCors(cfg: CorsConfig): void {
 	}
 }
 
-function isOriginAllowed(cfg: CorsConfig, origin: string): string | false {
+/** The `Access-Control-Allow-Origin` value for `origin`, or false when not allowed. */
+function isOriginAllowed(
+	cfg: CorsConfig,
+	origin: string,
+	ctx: BlackholeContext,
+): string | false {
 	if (!origin) return false;
-	const o = cfg.origin;
-	if (o === true || o === "*") return "*";
-	if (o === false) return false;
-	if (typeof o === "function") return o(origin) ? origin : false;
-	// A string may be a single origin OR a comma-separated allow-list (Adonis
-	// accepts `'a.com,b.com'`); split so a ported Adonis config isn't silently
-	// a deny-all.
-	if (typeof o === "string") {
-		const list = o.split(",").map((entry) => entry.trim());
-		return list.includes(origin) ? origin : false;
-	}
-	if (Array.isArray(o)) return o.includes(origin) ? origin : false;
-	return false;
+	const allowed =
+		typeof cfg.origin === "function" ? cfg.origin(origin, ctx) : cfg.origin;
+	if (allowed === true) return origin;
+	if (allowed === false) return false;
+	// The literal wildcard. With credentials a browser refuses it — the static
+	// form is already refused at boot, and a callback answering it gets what
+	// it asked for, which the browser then blocks.
+	if (allowed === "*") return "*";
+	// A string may be a single origin OR a comma-separated allow-list.
+	const list = Array.isArray(allowed)
+		? allowed
+		: allowed.split(",").map((entry) => entry.trim());
+	return list.includes(origin) ? origin : false;
 }
 
-/** Split the browser's `Access-Control-Request-Headers` into a trimmed list. */
-function parseRequestedHeaders(value: string | undefined): string[] {
+/** Split a comma-separated header list into trimmed, non-empty entries. */
+function splitHeaderList(value: string | undefined): string[] {
 	if (!value) return [];
 	return value
 		.split(",")
 		.map((h) => h.trim())
 		.filter((h) => h.length > 0);
 }
+
+/**
+ * Response headers the browser exposes without being told: listing only these
+ * is the same as listing nothing.
+ */
+const SIMPLE_EXPOSE_HEADERS = new Set([
+	"cache-control",
+	"content-language",
+	"content-type",
+	"expires",
+	"last-modified",
+	"pragma",
+]);
 
 const DEFAULT_CORS_METHODS = [
 	"GET",
@@ -362,25 +702,45 @@ const DEFAULT_CORS_HEADERS = [
 	"X-Requested-With",
 ];
 
+/** The headers a preflight may carry, per `cfg.headers`; `true` reflects. */
+function allowedRequestHeaders(
+	cfg: CorsConfig,
+	requested: string[],
+	ctx: BlackholeContext,
+): string[] {
+	const value =
+		typeof cfg.headers === "function"
+			? cfg.headers(requested, ctx)
+			: (cfg.headers ?? DEFAULT_CORS_HEADERS);
+	if (value === true) return requested;
+	if (value === false) return [];
+	return Array.isArray(value) ? value : splitHeaderList(value);
+}
+
 /** Compute the CORS headers + flags for one request. */
 function computeCors(
 	cfg: CorsConfig,
 	requestOrigin: string,
 	method: string,
+	ctx: BlackholeContext,
 	requestMethod?: string,
 	requestHeaders?: string,
-): CorsResult {
-	const allowed = isOriginAllowed(cfg, requestOrigin);
+): CorsResult | undefined {
+	const enabled =
+		typeof cfg.enabled === "function" ? cfg.enabled(ctx) : cfg.enabled;
+	if (enabled === false) return undefined;
+	const allowed = isOriginAllowed(cfg, requestOrigin, ctx);
 	const headers: Record<string, string> = {};
 	// Vary on Origin unless the policy is static (`*` / `false`).
-	const varyOrigin =
-		cfg.origin !== true && cfg.origin !== "*" && cfg.origin !== false;
+	const varyOrigin = cfg.origin !== "*" && cfg.origin !== false;
 	if (allowed) {
-		headers["access-control-allow-origin"] =
-			allowed === "*" ? "*" : requestOrigin;
+		headers["access-control-allow-origin"] = allowed;
 		if (cfg.credentials) headers["access-control-allow-credentials"] = "true";
-		if (cfg.exposedHeaders?.length) {
-			headers["access-control-expose-headers"] = cfg.exposedHeaders.join(", ");
+		const exposed = (cfg.exposeHeaders ?? cfg.exposedHeaders ?? []).map((h) =>
+			h.toLowerCase(),
+		);
+		if (exposed.some((h) => !SIMPLE_EXPOSE_HEADERS.has(h))) {
+			headers["access-control-expose-headers"] = exposed.join(", ");
 		}
 	}
 	// A genuine CORS preflight is OPTIONS + an allowed origin + the
@@ -394,8 +754,8 @@ function computeCors(
 	if (preflight && allowed && requestMethod) {
 		const allowedMethods = cfg.methods ?? DEFAULT_CORS_METHODS;
 		// Reject the preflight (emit NO Access-Control-Allow-* → browser blocks)
-		// when the requested method isn't allowed, matching the CORS spec /
-		// @adonisjs/cors — rather than advertising the full list regardless.
+		// when the requested method isn't allowed, matching the CORS spec —
+		// rather than advertising the full list regardless.
 		if (
 			!allowedMethods
 				.map((m) => m.toUpperCase())
@@ -405,21 +765,15 @@ function computeCors(
 		}
 		headers["access-control-allow-methods"] = allowedMethods.join(", ");
 
-		// Requested headers: `true` reflects them, an array is an allow-list (a
-		// header outside it refuses the preflight), else the common default list.
-		const requested = parseRequestedHeaders(requestHeaders);
-		if (cfg.headers === true) {
-			headers["access-control-allow-headers"] =
-				requested.length > 0
-					? requested.join(", ")
-					: DEFAULT_CORS_HEADERS.join(", ");
-		} else {
-			const allowList = cfg.headers ?? DEFAULT_CORS_HEADERS;
-			const lowered = allowList.map((h) => h.toLowerCase());
-			const disallowed = requested.find(
-				(h) => !lowered.includes(h.toLowerCase()),
-			);
-			if (disallowed) return { headers, varyOrigin, preflight };
+		// A requested header outside the allowed ones refuses the preflight.
+		const requested = splitHeaderList(requestHeaders);
+		const allowList = allowedRequestHeaders(cfg, requested, ctx);
+		const lowered = allowList.map((h) => h.toLowerCase());
+		const disallowed = requested.find(
+			(h) => h.toLowerCase() !== "origin" && !lowered.includes(h.toLowerCase()),
+		);
+		if (disallowed) return { headers, varyOrigin, preflight };
+		if (allowList.length > 0) {
 			headers["access-control-allow-headers"] = allowList.join(", ");
 		}
 		if (cfg.maxAge) headers["access-control-max-age"] = String(cfg.maxAge);
@@ -452,15 +806,18 @@ export interface CsrfConfig {
 	/** Enable CSRF validation (default: true). */
 	enabled?: boolean;
 	/**
-	 * Routes to skip: patterns (exact, or trailing-`*` prefix) or a predicate.
+	 * Routes to skip: an array of patterns, or a predicate.
 	 *
-	 * AdonisJS accepts both. The ARRAY form is evaluated in Rust with the rest
-	 * of the check; a PREDICATE runs in JS before it, since a function cannot
-	 * cross the NAPI boundary.
+	 * An entry matches the pattern of the route the request matched
+	 * (`'/webhooks/:provider'`), where the host has matched one by then — Ream
+	 * and Fastify. It also matches the request path, exactly or, with a
+	 * trailing `*`, by prefix (`'/webhooks/*'`), which is the only form the
+	 * adapters without a route (Express, Hono) can apply.
+	 *
+	 * The predicate receives the request context ({@link BlackholeContext}; the
+	 * HTTP context itself under Ream) and returns `true` to skip the check.
 	 */
-	exceptRoutes?:
-		| string[]
-		| ((req: { method: string; path: string }) => boolean);
+	exceptRoutes?: string[] | ((ctx: BlackholeContext) => boolean);
 	/** HTTP methods to guard (default: POST, PUT, PATCH, DELETE). */
 	methods?: string[];
 	/**
@@ -524,9 +881,29 @@ export interface RateLimitDecision {
 	resetSeconds: number;
 }
 
-export interface BlackholeOptions {
-	/** Enable XSS response sanitization (default: true). */
-	xss?: boolean;
+/** The attributes an untrusted HTML fragment may keep when opted into. */
+export type XssOptInAttribute = "id" | "is" | "slot" | "part" | "data-*";
+
+/** XSS response sanitization, in its object form. */
+export interface XssConfig {
+	/** Sanitize `text/html` fragments (default: true). */
+	enabled?: boolean;
+	/**
+	 * Attributes the sanitizer keeps although it drops them by default: `id`
+	 * (DOM clobbering — `<a id="config">` shadows `window.config`), `is`
+	 * (customized built-in elements), `data-*` (read by client-side frameworks
+	 * as bindings), `slot` and `part` (shadow DOM). Opt in only when the page
+	 * reads none of them from untrusted markup.
+	 */
+	allowAttributes?: XssOptInAttribute[];
+}
+
+export interface BlackholeOptions extends SecurityHeadersOptions {
+	/**
+	 * XSS response sanitization of `text/html` fragments (default: true).
+	 * `false` turns it off; an object keeps it on and opts attributes back in.
+	 */
+	xss?: boolean | XssConfig;
 	/** CSRF validation — `true`/`false` to toggle, or an object for fine-grained control. */
 	csrf?: boolean | CsrfConfig;
 	/** Rate limiting configuration. */
@@ -550,8 +927,6 @@ export interface BlackholeOptions {
 	pathTraversal?: boolean;
 	/** Reject requests with duplicate query params (HTTP parameter pollution) (default: true). */
 	paramPollution?: boolean;
-	/** Protective response headers. Defaults applied when omitted; `false` to disable. */
-	securityHeaders?: SecurityHeadersConfig | false;
 	/** Cross-Origin Resource Sharing policy. Omit to leave CORS unmanaged. */
 	cors?: CorsConfig;
 	/**
@@ -560,10 +935,11 @@ export interface BlackholeOptions {
 	 * must share the same secret (stateless horizontal scale).
 	 *
 	 * Scope of the signature: it proves a token was minted by this server, so an
-	 * attacker can't forge a brand-new valid pair. It does NOT bind the token to a
-	 * user/session, so it alone does not stop an attacker replaying a token they
-	 * were legitimately issued — the same-origin `Origin`/`Referer` check on
-	 * unsafe verbs (enabled by default) is what closes that cookie-injection gap.
+	 * attacker can't forge a brand-new valid pair. Under the Ream middleware with
+	 * a session, the signature also covers a per-session secret, so a token is
+	 * refused for any other session. Without a session (the standalone
+	 * adapters) it binds to nothing, and the same-origin `Origin`/`Referer`
+	 * check on unsafe verbs is what stops a replayed, legitimately issued token.
 	 */
 	secret?: string;
 }
@@ -596,13 +972,27 @@ export interface Blackhole {
 		/** `http` or `https`: the Origin must match it on a CSRF-guarded request. */
 		protocol?: string;
 		/**
+		 * `host[:port]` as the host resolved it (trust-proxy aware), compared
+		 * with the Origin on a CSRF-guarded request. The `Host` header when
+		 * omitted.
+		 */
+		host?: string;
+		/**
+		 * The session's CSRF secret: the token must have been issued under it.
+		 * Omitted (or empty) when the host has no session.
+		 */
+		csrfBinding?: string;
+		/**
 		 * Run only these checks — for a host that splits the pipeline across
 		 * two middlewares. All of them when omitted.
 		 */
 		checks?: EngineCheck[];
 	}): CheckResult;
-	/** Generate a new CSRF token. */
-	generateCsrfToken(): string;
+	/**
+	 * Generate a new CSRF token — bound to `binding` (the session's CSRF
+	 * secret) when one is given, so it verifies for that session only.
+	 */
+	generateCsrfToken(binding?: string): string;
 	/** Sanitize an outgoing response body based on content type. */
 	sanitizeResponse(body: string, contentType: string): string;
 	/**
@@ -614,12 +1004,16 @@ export interface Blackhole {
 	cspHasNonce(): boolean;
 	/** Generate a fresh CSP nonce (base64). */
 	generateNonce(): string;
-	/** CORS decision for a request, or `undefined` when CORS isn't configured. */
+	/**
+	 * CORS decision for a request, or `undefined` when CORS isn't configured
+	 * (or `enabled` turns it off for this request).
+	 */
 	cors(
 		requestOrigin: string,
 		method: string,
 		requestMethod?: string,
 		requestHeaders?: string,
+		ctx?: BlackholeContext,
 	): CorsResult | undefined;
 	/** Name + attributes of the `XSRF-TOKEN` cookie the middleware should seed. */
 	csrfCookie(): { name: string; options: Record<string, unknown> };
@@ -631,14 +1025,20 @@ export interface Blackhole {
 	 * between the two therefore costs at most a needless reissue, which is why
 	 * repeating the signature check here is safe.
 	 */
-	csrfTokenIsValid(token: string): boolean;
+	csrfTokenIsValid(token: string, binding?: string): boolean;
 	/** Whether the readable `XSRF-TOKEN` cookie should be seeded at all. */
 	xsrfCookieEnabled(): boolean;
-	/** Whether a JS-side `exceptRoutes` predicate exempts this request. */
-	csrfExempt(req: { method: string; path: string }): boolean;
+	/**
+	 * Whether `exceptRoutes` exempts this request on what only JS knows: the
+	 * predicate, or an entry naming the matched route's pattern. The path
+	 * forms are applied by `check()` itself.
+	 */
+	csrfExempt(ctx: BlackholeContext): boolean;
 	/**
 	 * Counting key for a request — the configured `rateLimit.keyFor(ctx)`, or the
-	 * client IP by default (parity with limiter's `usingKey`).
+	 * client IP by default (parity with limiter's `usingKey`). An IPv6 client
+	 * counts under its /64: one host holds the whole /64, and counting each of
+	 * its 2^64 addresses separately was no limit at all.
 	 */
 	rateLimitKey(ctx: RateLimitContext): string;
 	/**
@@ -730,14 +1130,20 @@ function assertUsableSecret(secret: string): void {
  * that decides whether a request passes. So if the two ever disagreed, the
  * cost is a cookie reissued once too often, not a request wrongly allowed.
  */
-function verifyCsrfToken(token: string, secret: string | undefined): boolean {
+function verifyCsrfToken(
+	token: string,
+	secret: string | undefined,
+	binding = "",
+): boolean {
 	if (!secret) return false;
 	const dot = token.indexOf(".");
 	if (dot <= 0 || dot === token.length - 1) return false;
 	const random = token.slice(0, dot);
 	const signature = token.slice(dot + 1);
+	// What the engine signs: the random part, and the session's binding after
+	// a `:` when there is one (`signed_message` in csrf.rs).
 	const expected = createHmac("sha256", secret)
-		.update(random)
+		.update(binding ? `${random}:${binding}` : random)
 		.digest("base64url");
 	const given = Buffer.from(signature, "utf8");
 	const want = Buffer.from(expected, "utf8");
@@ -747,7 +1153,7 @@ function verifyCsrfToken(token: string, secret: string | undefined): boolean {
 function resolveCsrf(csrf: boolean | CsrfConfig | undefined): {
 	enabled: boolean;
 	exceptRoutes: string[];
-	exceptPredicate?: (req: { method: string; path: string }) => boolean;
+	exceptPredicate?: (ctx: BlackholeContext) => boolean;
 	methods: string[];
 	trustedOrigins: string[];
 	enableXsrfCookie: boolean;
@@ -791,6 +1197,26 @@ function resolveCsrf(csrf: boolean | CsrfConfig | undefined): {
 }
 
 /**
+ * The {@link BlackholeContext} of a host that has no context object of its
+ * own: the method, the path, the headers, and the route pattern if known.
+ */
+export function pathContext(
+	method: string,
+	path: string,
+	headers: Readonly<Record<string, string>> = {},
+	routePattern?: string,
+): BlackholeContext {
+	return {
+		request: {
+			method: () => method,
+			url: () => path,
+			header: (name) => headers[name.toLowerCase()],
+		},
+		route: routePattern === undefined ? null : { pattern: routePattern },
+	};
+}
+
+/**
  * Create a Blackhole security filter instance.
  *
  * @throws If the NAPI binary is not available.
@@ -803,7 +1229,12 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		);
 	}
 
+	assertNoRetiredOptions(options);
 	const csrf = resolveCsrf(options.csrf);
+	const xss: XssConfig =
+		typeof options.xss === "object"
+			? options.xss
+			: { enabled: options.xss ?? true };
 	// Fail closed: signed double-submit needs a secret. Silently falling back to
 	// an unsigned token (or a per-process ephemeral key that breaks multi-instance
 	// verification) would be a quiet downgrade — exactly what we refuse to ship.
@@ -825,7 +1256,7 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 	const useRustLimiter =
 		rateLimit !== undefined && rateLimit.store === undefined;
 	const filter = new native.Blackhole(
-		options.xss ?? true,
+		xss.enabled ?? true,
 		csrf.enabled,
 		useRustLimiter ? rateLimit?.max : undefined,
 		useRustLimiter ? rateLimit?.windowSeconds : undefined,
@@ -835,9 +1266,10 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		csrf.methods,
 		options.secret,
 		csrf.trustedOrigins,
+		xss.allowAttributes ?? [],
 	);
 
-	const baseHeaders = computeSecurityHeaders(options.securityHeaders);
+	const baseHeaders = computeSecurityHeaders(options);
 	// The CSP may live under either the enforcing or the Report-Only header key.
 	const cspHeaderName = baseHeaders["content-security-policy-report-only"]
 		? "content-security-policy-report-only"
@@ -859,10 +1291,12 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 				req.remoteAddr ?? "",
 				req.protocol,
 				req.checks,
+				req.host,
+				req.csrfBinding,
 			);
 		},
-		generateCsrfToken() {
-			return filter.generateCsrfToken();
+		generateCsrfToken(binding) {
+			return filter.generateCsrfToken(binding);
 		},
 		sanitizeResponse(body: string, contentType: string) {
 			return filter.sanitizeResponse(body, contentType);
@@ -885,17 +1319,13 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		generateNonce() {
 			return randomBytes(16).toString("base64");
 		},
-		cors(
-			requestOrigin: string,
-			method: string,
-			requestMethod?: string,
-			requestHeaders?: string,
-		) {
+		cors(requestOrigin, method, requestMethod, requestHeaders, ctx) {
 			return corsConfig
 				? computeCors(
 						corsConfig,
 						requestOrigin,
 						method,
+						ctx ?? pathContext(method, ""),
 						requestMethod,
 						requestHeaders,
 					)
@@ -904,19 +1334,21 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		xsrfCookieEnabled() {
 			return csrf.enableXsrfCookie;
 		},
-		csrfExempt(req) {
-			// The array form is handled inside the Rust check; only the predicate
-			// has to be asked here.
-			return csrf.exceptPredicate?.(req) ?? false;
+		csrfExempt(ctx) {
+			if (csrf.exceptPredicate) return csrf.exceptPredicate(ctx);
+			// The path forms are applied inside the Rust check; the matched
+			// route's pattern is only known here.
+			const pattern = ctx.route?.pattern;
+			return pattern !== undefined && csrf.exceptRoutes.includes(pattern);
 		},
 		csrfCookie() {
 			return { name: CSRF_COOKIE_NAME, options: csrf.cookieOptions };
 		},
-		csrfTokenIsValid(token) {
-			return verifyCsrfToken(token, options.secret);
+		csrfTokenIsValid(token, binding) {
+			return verifyCsrfToken(token, options.secret, binding);
 		},
 		rateLimitKey(ctx) {
-			return rateLimit?.keyFor?.(ctx) ?? ctx.request.ip();
+			return rateLimit?.keyFor?.(ctx) ?? clientKey(ctx.request.ip());
 		},
 		rateLimitKeyedByRequest() {
 			return rateLimit?.keyFor !== undefined;
@@ -946,6 +1378,28 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 	};
 }
 
+export { clientKey } from "./clientKey.js";
+export {
+	defineThrottle,
+	HttpLimiter,
+	Limiter,
+	type LimiterConfig,
+	type LimiterHttpContext,
+	LimiterManager,
+	type LimiterOptions,
+	type LimiterRecord,
+	type LimiterRedisClient,
+	type LimiterRedisSource,
+	LimiterResponse,
+	type LimiterStore,
+	type LimiterStoreFactory,
+	limiterStores,
+	MemoryLimiterStore,
+	RedisLimiterStore,
+	type ThrottleContext,
+	ThrottleException,
+	type ThrottleMiddleware,
+} from "./limiter.js";
 export { quasarConnection } from "./quasar.js";
 export {
 	MemoryRateLimitStore,

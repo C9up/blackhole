@@ -35,6 +35,15 @@ pub struct Request {
     /// from `X-Forwarded-Proto`). Empty when the host does not say — the CSRF
     /// origin check then compares hosts only.
     pub scheme: String,
+    /// `host[:port]`, as the host resolved it (behind a trusted proxy, from
+    /// `X-Forwarded-Host`) — the same resolution that gave `scheme`. Empty
+    /// when the host does not say: the CSRF origin check then reads the
+    /// `Host` header.
+    pub host: String,
+    /// A per-session secret the CSRF token's signature also covers, so a token
+    /// verifies only for the session it was issued to. Empty when the host
+    /// has no session: the token is then signed on its own.
+    pub csrf_binding: String,
 }
 
 /// Minimal response for rejected requests.

@@ -6,7 +6,13 @@
  * duplicating the CORS → check → CSRF → headers → sanitize pipeline.
  */
 
-import type { Blackhole, CheckResult, EngineCheck } from "./index.js";
+import {
+	type Blackhole,
+	type BlackholeContext,
+	type CheckResult,
+	type EngineCheck,
+	pathContext,
+} from "./index.js";
 
 /** Framework-agnostic view of an incoming request. */
 export interface CoreRequest {
@@ -22,6 +28,64 @@ export interface CoreRequest {
 	 * origin check compares it with the Origin's scheme; without it, hosts only.
 	 */
 	protocol?: string;
+	/**
+	 * `host[:port]` as the host resolved it (trust-proxy aware, like
+	 * `protocol`). The CSRF origin check compares it with the Origin; without
+	 * it, the raw `Host` header.
+	 */
+	host?: string;
+	/**
+	 * The session's CSRF secret, when the host has a session: tokens are then
+	 * issued for that session and refused for any other.
+	 */
+	csrfBinding?: string;
+	/** The pattern of the route the request matched, when the host knows it. */
+	routePattern?: string;
+	/**
+	 * The host's own request context, handed to config callbacks
+	 * (`exceptRoutes`, `cors.origin`…). Built from the fields above when
+	 * omitted.
+	 */
+	context?: BlackholeContext;
+}
+
+/** The context config callbacks receive for `req`. */
+function contextOf(req: CoreRequest): BlackholeContext {
+	return (
+		req.context ??
+		pathContext(req.method, req.path, req.headers, req.routePattern)
+	);
+}
+
+/**
+ * The query string of `url`, without its leading `?`. Never throws on
+ * malformed input.
+ *
+ * Without the `?` stripped, the engine read the first key as `?key`, so a
+ * duplicate of the FIRST parameter (`?role=user&role=admin`) was never seen.
+ */
+export function queryOf(url: string): string {
+	try {
+		return new URL(url, "http://localhost").search.replace(/^\?/, "");
+	} catch {
+		return "";
+	}
+}
+
+/**
+ * The path of a raw request target (`/a/../b?x=1` → `/a/../b`), exactly as the
+ * client sent it.
+ *
+ * Not `new URL(...).pathname`: the WHATWG parser resolves `..` and `%2e%2e`
+ * before anything can look at them, which is what the path-traversal guard
+ * exists to see.
+ */
+export function rawPathOf(target: string): string {
+	const end = target.search(/[?#]/);
+	const path = end === -1 ? target : target.slice(0, end);
+	// An absolute-form target (`GET http://host/path`) carries its origin.
+	const absolute = /^[a-z][a-z0-9+.-]*:\/\/[^/]*/i.exec(path);
+	return absolute ? path.slice(absolute[0].length) || "/" : path;
 }
 
 /** A refusal: the adapter answers with it and stops. */
@@ -150,15 +214,6 @@ function safeJsonParse(body: string | undefined): unknown {
 	}
 }
 
-/** Safe URL → search string (`?a=1`). Never throws on malformed input. */
-function safeQuery(url: string): string {
-	try {
-		return new URL(url, "http://localhost").search;
-	} catch {
-		return "";
-	}
-}
-
 /**
  * Append a token to a `Vary` header value without duplicating (case-insensitive).
  * Returns the new header value. Pure — adapters read/write their own header.
@@ -208,12 +263,12 @@ export function serializeCookie(
  */
 function usableCsrfToken(
 	bh: Blackhole,
-	req: { headers: Record<string, string> },
+	req: { headers: Readonly<Record<string, string>>; csrfBinding?: string },
 ): string | undefined {
 	const { name } = bh.csrfCookie();
 	const existing = readCookie(req.headers.cookie ?? "", name);
 	if (existing === undefined) return undefined;
-	return bh.csrfTokenIsValid(existing) ? existing : undefined;
+	return bh.csrfTokenIsValid(existing, req.csrfBinding) ? existing : undefined;
 }
 
 function readCookie(cookieHeader: string, name: string): string | undefined {
@@ -230,11 +285,13 @@ function engineCheck(
 	const result = bh.check({
 		method: req.method,
 		path: req.path,
-		query: safeQuery(req.url),
+		query: queryOf(req.url),
 		headers: req.headers,
 		body: req.body,
 		remoteAddr: req.remoteAddr,
 		protocol: req.protocol,
+		host: req.host,
+		csrfBinding: req.csrfBinding,
 		checks,
 	});
 	if (result.allowed) return { result };
@@ -265,6 +322,7 @@ export function runGuardPhase(
 		req.method,
 		req.headers["access-control-request-method"],
 		req.headers["access-control-request-headers"],
+		contextOf(req),
 	);
 	const corsHeaders = cors?.headers ?? {};
 	const varyOrigin = cors?.varyOrigin ?? false;
@@ -296,10 +354,11 @@ export function runCsrfPhase(
 ): CsrfOutcome {
 	const { name, options } = bh.csrfCookie();
 	const existing = usableCsrfToken(bh, req);
-	// A predicate `exceptRoutes` runs before the engine: a function cannot cross
-	// the NAPI boundary, so the exemption is decided here. It exempts from CSRF
-	// only — the rate limit still counts the request.
-	const exempt = bh.csrfExempt({ method: req.method, path: req.path });
+	// A predicate `exceptRoutes`, or an entry naming the matched route's
+	// pattern, is decided here, before the engine: a function cannot cross the
+	// NAPI boundary, and the engine sees paths, not routes. It exempts from
+	// CSRF only — the rate limit still counts the request.
+	const exempt = bh.csrfExempt(contextOf(req));
 	const checks: EngineCheck[] = exempt ? [] : ["csrf"];
 	if (rateLimit) checks.unshift("rateLimit");
 	let result: CheckResult | undefined;
@@ -308,7 +367,7 @@ export function runCsrfPhase(
 		if (checked.reject) return checked.reject;
 		result = checked.result;
 	}
-	const csrfToken = existing ?? bh.generateCsrfToken();
+	const csrfToken = existing ?? bh.generateCsrfToken(req.csrfBinding);
 	return {
 		kind: "pass",
 		csrfToken,

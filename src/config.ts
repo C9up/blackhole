@@ -16,13 +16,23 @@ import type {
 	CsrfConfig,
 	RateLimitContext,
 	RateLimitStore,
-	SecurityHeadersConfig,
+	SecurityHeadersOptions,
+	XssConfig,
 } from "./index.js";
+import type { LimiterConfig } from "./limiter.js";
 import type { RateLimitStoreFactory } from "./stores.js";
 
-export interface BlackholeConfig {
-	/** Enable XSS response sanitization (default: true). */
-	xss?: boolean;
+/**
+ * The protective headers are top-level keys — `xFrame`, `hsts`,
+ * `contentTypeSniffing`, `csp`, `referrerPolicy`, `permissionsPolicy` — each
+ * `{ enabled, ... }` and on by default (see {@link SecurityHeadersOptions}).
+ */
+export interface BlackholeConfig extends SecurityHeadersOptions {
+	/**
+	 * XSS response sanitization of `text/html` fragments (default: true).
+	 * `false` turns it off; an object keeps it on and opts attributes back in.
+	 */
+	xss?: boolean | XssConfig;
 	/** CSRF validation — `true`/`false` to toggle, or an object (exceptRoutes, methods, cookie). */
 	csrf?: boolean | CsrfConfig;
 	/**
@@ -63,12 +73,21 @@ export interface BlackholeConfig {
 		 */
 		store?: RateLimitStore;
 	};
+	/**
+	 * The stores behind the per-route limits (`limiter.define` + `throttle`,
+	 * and the manual `limiter.use(...)`), and which one counts by default.
+	 * Omitted: one store, in this process's memory.
+	 *
+	 *   limiter: {
+	 *     default: env.get('LIMITER_STORE', 'memory'),
+	 *     stores: { memory: limiterStores.memory(), redis: limiterStores.redis({ connection: 'main' }) },
+	 *   }
+	 */
+	limiter?: LimiterConfig;
 	/** Reject path-traversal sequences in the request path (default: true). */
 	pathTraversal?: boolean;
 	/** Reject duplicate query params / HTTP parameter pollution (default: true). */
 	paramPollution?: boolean;
-	/** Protective response headers. Defaults applied when omitted; `false` to disable. */
-	securityHeaders?: SecurityHeadersConfig | false;
 	/** Cross-Origin Resource Sharing policy. Omit to leave CORS unmanaged. */
 	cors?: CorsConfig;
 	/**

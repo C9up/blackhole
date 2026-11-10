@@ -9,19 +9,27 @@
  */
 
 import type { RateLimitRedisClient } from "./stores.js";
-import { quasarConnection as loadQuasarConnection } from "./vendor/quasarConnection.js";
+import {
+	hasCommands,
+	quasarConnection as loadQuasarConnection,
+} from "./vendor/quasarConnection.js";
 
 // The three commands the counter issues, and nothing more.
 const REQUIRED = ["incr", "expire", "ttl"] as const;
+
+function isRateLimitRedisClient(value: unknown): value is RateLimitRedisClient {
+	return hasCommands(value, REQUIRED);
+}
 
 /** The named connection, once it is known to carry what this package issues. */
 export async function quasarConnection(
 	name?: string,
 ): Promise<RateLimitRedisClient> {
-	return loadQuasarConnection<RateLimitRedisClient>({
+	return loadQuasarConnection({
 		pkg: "blackhole",
 		name,
 		required: REQUIRED,
+		isConnection: isRateLimitRedisClient,
 		what: "the rate-limit counter",
 		alternative: "or pass a client instead of a connection name",
 		raise: (_reason, message, cause) => new Error(message, { cause }),

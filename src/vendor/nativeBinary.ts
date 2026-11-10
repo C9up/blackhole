@@ -87,24 +87,68 @@ export type NativeBinaryResult<T> =
 	| { loaded: true; binary: T }
 	| { loaded: false; suffix: string | undefined; cause?: unknown };
 
+/** Whether `value` carries a function under `name` (a napi class is one too). */
+function hasFunction(value: object, name: string): boolean {
+	const member: unknown = Reflect.get(value, name);
+	return typeof member === "function";
+}
+
 /**
- * Load `<package root>/index.<suffix>.node`.
+ * Whether `value` carries every one of `names` as a function.
+ *
+ * The building block of the guard a package hands to `loadNativeBinary`: it
+ * lists what the package actually calls on its binary, functions and classes
+ * alike.
+ */
+export function hasFunctions(
+	value: unknown,
+	names: readonly string[],
+): value is object {
+	if (typeof value !== "object" || value === null) return false;
+	return names.every((name) => hasFunction(value, name));
+}
+
+/**
+ * Load `<package root>/index.<suffix>.node`, and check it is the binary the
+ * package calls.
  *
  * The path is fixed rather than passed: this file is generated into
  * `<package>/src/vendor/`, so the package root is always two levels up, from
  * `src` and from `dist` alike.
+ *
+ * `isBinary` is the package's own check of what it calls. A declaration only
+ * says what the Rust promises: a stale build, or one from another version,
+ * loads just as well and then fails on the first missing call, far from here.
+ * A rejected module is reported as a failed load, so the package's policy
+ * (degrade or refuse) applies to it unchanged.
  */
-export function loadNativeBinary<T>(): NativeBinaryResult<T> {
+export function loadNativeBinary<T>(
+	isBinary: (value: unknown) => value is T,
+): NativeBinaryResult<T> {
 	const suffix = nativeBinarySuffix();
 	if (suffix === undefined) return { loaded: false, suffix };
 	const here = dirname(fileURLToPath(import.meta.url));
+	let loaded: unknown;
 	try {
 		const nodeRequire = createRequire(import.meta.url);
-		return {
-			loaded: true,
-			binary: nodeRequire(join(here, `../../index.${suffix}.node`)) as T,
-		};
+		loaded = nodeRequire(join(here, `../../index.${suffix}.node`));
 	} catch (cause) {
 		return { loaded: false, suffix, cause };
 	}
+	if (isBinary(loaded)) return { loaded: true, binary: loaded };
+	// The guard answers yes or no; what the binary does export is what lets a
+	// reader see which call it lacks.
+	const exported =
+		typeof loaded === "object" && loaded !== null
+			? Object.keys(loaded).filter((name) => hasFunction(loaded, name))
+			: [];
+	return {
+		loaded: false,
+		suffix,
+		cause: new Error(
+			`index.${suffix}.node loaded, but it lacks functions this package calls ` +
+				`(it exports: ${exported.length > 0 ? exported.join(", ") : "none"}). ` +
+				"The binary is stale or from another version: rebuild it.",
+		),
+	};
 }

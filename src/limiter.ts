@@ -28,7 +28,10 @@
 
 import { clientKey } from "./clientKey.js";
 import { durationToSeconds } from "./duration.js";
-import { quasarConnection as loadQuasarConnection } from "./vendor/quasarConnection.js";
+import {
+	hasCommands,
+	quasarConnection as loadQuasarConnection,
+} from "./vendor/quasarConnection.js";
 
 // ── Responses and the error ──────────────────────────────────────────────
 
@@ -317,6 +320,21 @@ export interface LimiterRedisClient {
 	): Promise<[string, string[]]>;
 }
 
+/** Every command of {@link LimiterRedisClient}: the limiter issues them all. */
+const LIMITER_COMMANDS = [
+	"incrby",
+	"pexpire",
+	"pttl",
+	"get",
+	"set",
+	"del",
+	"scan",
+] as const;
+
+function isLimiterRedisClient(value: unknown): value is LimiterRedisClient {
+	return hasCommands(value, LIMITER_COMMANDS);
+}
+
 export type LimiterRedisSource =
 	| LimiterRedisClient
 	| (() => LimiterRedisClient | Promise<LimiterRedisClient>);
@@ -428,18 +446,11 @@ export const limiterStores = {
 		const source: LimiterRedisSource =
 			typeof connection === "string"
 				? () =>
-						loadQuasarConnection<LimiterRedisClient>({
+						loadQuasarConnection({
 							pkg: "blackhole",
 							name: connection,
-							required: [
-								"incrby",
-								"pexpire",
-								"pttl",
-								"get",
-								"set",
-								"del",
-								"scan",
-							],
+							required: LIMITER_COMMANDS,
+							isConnection: isLimiterRedisClient,
 							what: "the limiter",
 							alternative: "or pass a client instead of a connection name",
 							raise: (_reason, message, cause) => new Error(message, { cause }),

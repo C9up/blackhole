@@ -4,7 +4,10 @@
  */
 import { describe, expect, it } from "vitest";
 import { clientKey, createBlackhole } from "../../src/index.js";
-import { loadNativeBinary } from "../../src/vendor/nativeBinary.js";
+import {
+	hasFunctions,
+	loadNativeBinary,
+} from "../../src/vendor/nativeBinary.js";
 
 const FRAGMENT =
 	'<a id="config" is="x-y" slot="s" part="p" data-bind="x" class="c" href="/x">l</a>';
@@ -35,8 +38,14 @@ describe("blackhole > XSS sanitizer attributes", () => {
 	it("refuses an attribute outside the opt-in list", () => {
 		// The engine itself refuses it: a config file written in JavaScript is
 		// not held to the type.
-		const attempt =
-			loadNativeBinary<typeof import("../../src/native/generated.js")>();
+		const attempt = loadNativeBinary(
+			(
+				value,
+			): value is Pick<
+				typeof import("../../src/native/generated.js"),
+				"Blackhole"
+			> => hasFunctions(value, ["Blackhole"]),
+		);
 		if (!attempt.loaded) throw new Error("the engine binary is not built");
 		const { Blackhole } = attempt.binary;
 		expect(

@@ -20,7 +20,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { clientKey } from "./clientKey.js";
 import { durationToSeconds } from "./duration.js";
-import { loadNativeBinary } from "./vendor/nativeBinary.js";
+import { hasFunctions, loadNativeBinary } from "./vendor/nativeBinary.js";
 import { inProduction } from "./vendor/nodeEnv.js";
 
 /**
@@ -47,12 +47,18 @@ export interface RateLimitMeta {
  * than restated here, where nothing would notice the engine gaining a
  * constructor argument or changing what `check` returns.
  */
-type NativeModule = typeof import("./native/generated.js");
+type NativeModule = Pick<typeof import("./native/generated.js"), "Blackhole">;
+
+/** The class is all this package uses; a stale binary without it is refused. */
+function isNativeModule(value: unknown): value is NativeModule {
+	return hasFunctions(value, ["Blackhole"]);
+}
 
 // Absent is not an error here: `createBlackhole` throws at use time, naming
 // what the caller was trying to do.
-const attempt = loadNativeBinary<NativeModule>();
+const attempt = loadNativeBinary(isNativeModule);
 const native = attempt.loaded ? attempt.binary : undefined;
+const loadError = attempt.loaded ? undefined : attempt.cause;
 
 /** `X-Frame-Options`: who may frame the pages. */
 export interface XFrameConfig {
@@ -1254,6 +1260,7 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		throw new Error(
 			"[BLACKHOLE_NAPI_REQUIRED] The Blackhole Rust engine is required but not loaded.\n" +
 				"  Fix: cd packages/blackhole && pnpm build:napi",
+			loadError !== undefined ? { cause: loadError } : undefined,
 		);
 	}
 

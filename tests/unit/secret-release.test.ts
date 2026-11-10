@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { posix, resolve } from "node:path";
 import { Secret } from "@c9up/ream";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
@@ -92,9 +92,18 @@ describe("blackhole > secret given as a Secret", () => {
  * one a new app is scaffolded with: APP_KEY is `Env.schema.secret()`.
  */
 function stubDiagnostics(): string[] {
-	const pkgRoot = resolve(import.meta.dirname, "..", "..");
+	// The compiler hands its host forward-slash paths on every platform
+	// (`D:/a/...` on Windows), so the in-memory files are keyed the same way.
+	const { dirname, join } = posix;
+	const pkgRoot = resolve(import.meta.dirname, "..", "..").replaceAll(
+		"\\",
+		"/",
+	);
 	const appRoot = join(pkgRoot, ".stub-app");
-	const raw = readFileSync(join(stubsRoot, "config", "blackhole.stub"), "utf8");
+	const raw = readFileSync(
+		resolve(stubsRoot, "config", "blackhole.stub"),
+		"utf8",
+	);
 	const [, front = "", body = ""] = raw.split(/^---\r?\n/m, 3);
 	const to = /^to:\s*(.+)$/m.exec(front)?.[1]?.trim() ?? "";
 	const configFile = join(appRoot, to);

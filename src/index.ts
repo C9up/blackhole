@@ -47,16 +47,21 @@ export interface RateLimitMeta {
  * than restated here, where nothing would notice the engine gaining a
  * constructor argument or changing what `check` returns.
  */
-type NativeModule = Pick<typeof import("./native/generated.js"), "Blackhole">;
+const NATIVE_CALLS = ["Blackhole"] as const;
+
+type NativeModule = Pick<
+	typeof import("./native/generated.js"),
+	(typeof NATIVE_CALLS)[number]
+>;
 
 /** The class is all this package uses; a stale binary without it is refused. */
 function isNativeModule(value: unknown): value is NativeModule {
-	return hasFunctions(value, ["Blackhole"]);
+	return hasFunctions(value, NATIVE_CALLS);
 }
 
 // Absent is not an error here: `createBlackhole` throws at use time, naming
 // what the caller was trying to do.
-const attempt = loadNativeBinary(isNativeModule);
+const attempt = loadNativeBinary(isNativeModule, NATIVE_CALLS);
 const native = attempt.loaded ? attempt.binary : undefined;
 const loadError = attempt.loaded ? undefined : attempt.cause;
 

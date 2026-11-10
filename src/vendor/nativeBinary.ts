@@ -94,18 +94,43 @@ function hasFunction(value: object, name: string): boolean {
 }
 
 /**
+ * The names among `names` that `value` does not carry as functions.
+ *
+ * Classes count, being functions, and so does a class's static member: `value`
+ * may itself be a function. What a guard rejects is only useful named, so the
+ * loader reports this list rather than a bare "no".
+ */
+export function missingFunctions(
+	value: unknown,
+	names: readonly string[],
+): string[] {
+	if (
+		value === null ||
+		(typeof value !== "object" && typeof value !== "function")
+	) {
+		return [...names];
+	}
+	return names.filter((name) => !hasFunction(value, name));
+}
+
+/**
  * Whether `value` carries every one of `names` as a function.
  *
- * The building block of the guard a package hands to `loadNativeBinary`: it
- * lists what the package actually calls on its binary, functions and classes
- * alike.
+ * The building block of the guard a package hands to `loadNativeBinary`, over
+ * the list of what it actually calls on its binary — the same list it passes
+ * as `expects`, so the message can name what is missing.
  */
 export function hasFunctions(
 	value: unknown,
 	names: readonly string[],
 ): value is object {
-	if (typeof value !== "object" || value === null) return false;
-	return names.every((name) => hasFunction(value, name));
+	if (
+		value === null ||
+		(typeof value !== "object" && typeof value !== "function")
+	) {
+		return false;
+	}
+	return missingFunctions(value, names).length === 0;
 }
 
 /**
@@ -120,10 +145,12 @@ export function hasFunctions(
  * says what the Rust promises: a stale build, or one from another version,
  * loads just as well and then fails on the first missing call, far from here.
  * A rejected module is reported as a failed load, so the package's policy
- * (degrade or refuse) applies to it unchanged.
+ * (degrade or refuse) applies to it unchanged. `expects`, the list the guard is
+ * built from, lets that report name the missing calls.
  */
 export function loadNativeBinary<T>(
 	isBinary: (value: unknown) => value is T,
+	expects?: readonly string[],
 ): NativeBinaryResult<T> {
 	const suffix = nativeBinarySuffix();
 	if (suffix === undefined) return { loaded: false, suffix };
@@ -136,19 +163,24 @@ export function loadNativeBinary<T>(
 		return { loaded: false, suffix, cause };
 	}
 	if (isBinary(loaded)) return { loaded: true, binary: loaded };
-	// The guard answers yes or no; what the binary does export is what lets a
-	// reader see which call it lacks.
-	const exported =
-		typeof loaded === "object" && loaded !== null
-			? Object.keys(loaded).filter((name) => hasFunction(loaded, name))
-			: [];
 	return {
 		loaded: false,
 		suffix,
 		cause: new Error(
-			`index.${suffix}.node loaded, but it lacks functions this package calls ` +
-				`(it exports: ${exported.length > 0 ? exported.join(", ") : "none"}). ` +
+			`index.${suffix}.node loaded, but ${rejection(loaded, expects)}. ` +
 				"The binary is stale or from another version: rebuild it.",
 		),
 	};
+}
+
+/** What a rejected binary lacks, or, without a list to check, what it has. */
+function rejection(loaded: unknown, expects?: readonly string[]): string {
+	const missing =
+		expects === undefined ? [] : missingFunctions(loaded, expects);
+	if (missing.length > 0) return `it lacks ${missing.join(", ")}`;
+	const exported =
+		typeof loaded === "object" && loaded !== null
+			? Object.keys(loaded).filter((name) => hasFunction(loaded, name))
+			: [];
+	return `it is not the binary this package calls (it exports: ${exported.length > 0 ? exported.join(", ") : "none"})`;
 }

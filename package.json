@@ -91,6 +91,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.12",
+    "@c9up/ream": "^0.2.26",
     "@types/node": "^22.20.1",
     "@vitest/coverage-v8": "4.1.11",
     "hono": "^4.13.10",

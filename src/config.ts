@@ -16,6 +16,7 @@ import type {
 	CsrfConfig,
 	RateLimitContext,
 	RateLimitStore,
+	ReleasableSecret,
 	SecurityHeadersOptions,
 	XssConfig,
 } from "./index.js";
@@ -94,8 +95,10 @@ export interface BlackholeConfig extends SecurityHeadersOptions {
 	 * HMAC secret for signing CSRF tokens (signed double-submit). Set to your
 	 * `APP_KEY` — e.g. `secret: env.get('APP_KEY')`. **Required** when CSRF is on:
 	 * `createBlackhole` throws if it's missing (fail-closed, no silent fallback).
+	 * A `Secret` is released when the filter is built, so the config keeps it
+	 * wrapped.
 	 */
-	secret?: string;
+	secret?: string | ReleasableSecret;
 }
 
 /** Typed config helper — identity function for editor inference. */

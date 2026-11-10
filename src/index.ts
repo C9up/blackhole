@@ -940,8 +940,17 @@ export interface BlackholeOptions extends SecurityHeadersOptions {
 	 * refused for any other session. Without a session (the standalone
 	 * adapters) it binds to nothing, and the same-origin `Origin`/`Referer`
 	 * check on unsafe verbs is what stops a replayed, legitimately issued token.
+	 *
+	 * A string, or a `Secret` (`env.get('APP_KEY')` when the env schema
+	 * declares it with `Env.schema.secret()`), released once when the filter
+	 * is built.
 	 */
-	secret?: string;
+	secret?: string | ReleasableSecret;
+}
+
+/** Anything that releases a secret string — an environment `Secret`. */
+export interface ReleasableSecret {
+	release(): string;
 }
 
 export interface CheckResult {
@@ -1119,6 +1128,25 @@ function assertUsableSecret(secret: string): void {
 }
 
 /**
+ * The secret as a string. Typed configs only hand over a string or a
+ * `Secret`; the guard is for an untyped (JavaScript) config, whose `Secret`
+ * would otherwise reach the HMAC as its redacted placeholder text.
+ */
+function releaseSecret(secret: unknown): string {
+	if (typeof secret === "string") return secret;
+	if (typeof secret === "object" && secret !== null && "release" in secret) {
+		const release: unknown = secret.release;
+		if (typeof release === "function") {
+			const released: unknown = release.call(secret);
+			if (typeof released === "string") return released;
+		}
+	}
+	throw new TypeError(
+		"[blackhole] the CSRF `secret` must be a string or a Secret wrapping one",
+	);
+}
+
+/**
  * Whether a CSRF token still carries a valid signature under the app secret.
  *
  * The token is `<random>.<base64url HMAC-SHA256 of random>`, minted by the
@@ -1238,15 +1266,17 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 	// Fail closed: signed double-submit needs a secret. Silently falling back to
 	// an unsigned token (or a per-process ephemeral key that breaks multi-instance
 	// verification) would be a quiet downgrade — exactly what we refuse to ship.
-	if (csrf.enabled && !options.secret) {
+	const secret =
+		options.secret === undefined ? undefined : releaseSecret(options.secret);
+	if (csrf.enabled && !secret) {
 		throw new Error(
 			"[blackhole] CSRF is enabled but no `secret` was provided. Pass your APP_KEY as " +
 				"`secret` so CSRF tokens are signed (signed double-submit). Disable with " +
 				"`csrf: false` only if you have an alternative CSRF defense.",
 		);
 	}
-	if (csrf.enabled && options.secret) {
-		assertUsableSecret(options.secret);
+	if (csrf.enabled && secret) {
+		assertUsableSecret(secret);
 	}
 	if (options.rateLimit !== undefined) assertRateLimit(options.rateLimit);
 	// A distributed store moves counting + the 429 decision into JS (see
@@ -1264,7 +1294,7 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		options.paramPollution ?? true,
 		csrf.exceptRoutes,
 		csrf.methods,
-		options.secret,
+		secret,
 		csrf.trustedOrigins,
 		xss.allowAttributes ?? [],
 	);
@@ -1345,7 +1375,7 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 			return { name: CSRF_COOKIE_NAME, options: csrf.cookieOptions };
 		},
 		csrfTokenIsValid(token, binding) {
-			return verifyCsrfToken(token, options.secret, binding);
+			return verifyCsrfToken(token, secret, binding);
 		},
 		rateLimitKey(ctx) {
 			return rateLimit?.keyFor?.(ctx) ?? clientKey(ctx.request.ip());

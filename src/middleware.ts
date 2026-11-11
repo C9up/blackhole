@@ -11,8 +11,11 @@
  *   import { defineConfig } from '@c9up/blackhole'
  *   export default defineConfig({ csrf: true, rateLimit: { max: 100, windowSeconds: 60 } })
  *
- *   // start/kernel.ts
- *   router.use([() => import('@c9up/blackhole/middleware')])
+ *   // start/kernel.ts — after the session middleware: tokens are bound to it
+ *   router.use([
+ *     () => import('@c9up/ream/session_middleware'),
+ *     () => import('@c9up/blackhole/middleware'),
+ *   ])
  */
 
 import { randomBytes } from "node:crypto";

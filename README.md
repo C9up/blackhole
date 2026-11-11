@@ -13,12 +13,22 @@ ream configure @c9up/blackhole
 
 ## Usage
 
-**Ream** — register the middleware:
+**Ream** — register the middleware, after the session middleware:
 
 ```ts
 // start/kernel.ts
-router.use([() => import('@c9up/blackhole/middleware')])
+router.use([
+  () => import('@c9up/ream/bodyparser_middleware'),
+  () => import('@c9up/ream/session_middleware'),
+  // After the session: CSRF tokens are bound to it.
+  () => import('@c9up/blackhole/middleware'),
+])
 ```
+
+The session middleware must be registered before blackhole's router
+middleware. When the application has a session config (`config/session.ts`)
+and blackhole runs first, every request is refused with
+`E_BLACKHOLE_SESSION_NOT_READY` rather than given a token bound to nothing.
 
 **Express / Fastify** — standalone adapters:
 
@@ -47,10 +57,19 @@ On by default (`csrf: true` in the generated config). A `POST`, `PUT`,
   the `host` / `protocol` options on Hono). An empty `Origin` counts as absent.
 - a token: the `XSRF-TOKEN` cookie echoed in `X-XSRF-TOKEN` / `X-CSRF-TOKEN`,
   or the `_csrf` form field. Tokens are HMAC-signed with `secret` (your
-  `APP_KEY`). On Ream with a session, they are also bound to a per-session
-  secret (`csrf-secret` in the session): a token issued to one session is
-  refused for any other, and dies with its session. Without a session (the
+  `APP_KEY`). On Ream, with the session middleware registered before
+  blackhole's, they are also bound to a per-session secret (`csrf-secret` in
+  the session): a token issued to one session is refused for any other, and
+  dies with its session. The secret is replaced whenever the session is
+  regenerated — at login and at logout — so a token issued before either is
+  refused after it, and the response carries a new one. Without a session (the
   standalone adapters), the token is signed but bound to nothing.
+
+`csrf.session` makes the binding mandatory: a request that reaches the check
+without a session is refused with `E_BLACKHOLE_SESSION_NOT_READY` (500). The
+Ream provider turns it on when the application has a session config; set
+`csrf: { session: false }` for an application whose CSRF-protected routes
+run without one.
 
 Both checks belong to the `csrf` switch: `csrf: false` turns both off.
 

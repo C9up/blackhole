@@ -150,6 +150,33 @@ describe("blackhole > blackholeMiddleware (Ream)", () => {
 		expect(ctx.response.getBody()).toBe(fullDoc);
 	});
 
+	it("does NOT sanitize a full document behind a comment or long white space", async () => {
+		const document =
+			'<!DOCTYPE html><html><head><title>T</title><script nonce="n">hydrate()</script></head><body><main><h1>Hi</h1></main></body></html>';
+		for (const prefix of [
+			"<!-- rendered by inker -->\n",
+			" ".repeat(20),
+			"\uFEFF\n\n\n<!-- a -->\n",
+		]) {
+			const { ctx } = makeReamContext({
+				bodyOut: `${prefix}${document}`,
+				contentTypeOut: "text/html; charset=utf-8",
+			});
+			await blackholeMiddleware(ctx, () => {});
+			expect(ctx.response.getBody()).toBe(`${prefix}${document}`);
+		}
+	});
+
+	it("still sanitizes a fragment that opens with a comment", async () => {
+		const { ctx } = makeReamContext({
+			bodyOut: "<!-- partial --><p>Hi</p><script>alert(1)</script>",
+			contentTypeOut: "text/html",
+		});
+		await blackholeMiddleware(ctx, () => {});
+		expect(ctx.response.getBody()).not.toMatch(/<script/i);
+		expect(ctx.response.getBody()).toContain("<p>Hi</p>");
+	});
+
 	it("does NOT sanitize non-text content types (e.g. application/json)", async () => {
 		const original = '{"raw":"<script>x</script>"}';
 		const { ctx } = makeReamContext({

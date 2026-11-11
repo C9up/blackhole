@@ -146,7 +146,8 @@ pub fn sanitize_html_with(input: &str, allow: &[String]) -> String {
 
 /// Sanitize a response body based on content type.
 /// - `text/html`: ammonia HTML sanitizer (parser-based, preserves safe wrapper
-///   tags; a full document opening with `<!doctype>`/`<html>` passes through).
+///   tags; a full document opening with `<!doctype>`/`<html>`, after any
+///   leading white space and comments, passes through).
 /// - Everything else (`text/plain`, JSON, CSV, binary, …): returned unmodified.
 ///   A non-HTML body is never parsed as markup by the browser (blackhole sets
 ///   `X-Content-Type-Options: nosniff` by default), so there is nothing to
@@ -167,15 +168,8 @@ pub fn sanitize_response_with(body: &str, content_type: &str, allow: &[String]) 
         // not pass through ammonia: ammonia treats every wrapper outside its
         // short allow-list (`<!doctype>`, `<html>`, `<head>`, `<body>`...) as
         // unsafe and strips them, leaving only the inner fragments. The
-        // result is a broken document. The cheap structural test below
-        // skips sanitisation when the body opens with `<!doctype` or `<html`.
-        let head: String = body
-            .chars()
-            .take(16)
-            .collect::<String>()
-            .trim_start()
-            .to_ascii_lowercase();
-        if head.starts_with("<!doctype") || head.starts_with("<html") {
+        // result is a broken document.
+        if is_full_document(body) {
             return body.to_string();
         }
         sanitize_html_with(body, allow)
@@ -187,6 +181,39 @@ pub fn sanitize_response_with(body: &str, content_type: &str, allow: &[String]) 
         // (robots.txt, plain-text APIs, CSV, …) for zero security gain.
         body.to_string()
     }
+}
+
+/// Whether `body` is a whole HTML document: once a byte-order mark, white
+/// space, comments and processing instructions (an XML prolog) are skipped,
+/// it opens with `<!doctype` or `<html`.
+///
+/// Only the prefix is read, never a marker further in: a fragment that merely
+/// contains `<html` somewhere is still a fragment, and sanitized as one.
+fn is_full_document(body: &str) -> bool {
+    let mut rest = body.strip_prefix('\u{feff}').unwrap_or(body);
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
+        let skipped = if let Some(comment) = rest.strip_prefix("<!--") {
+            comment.find("-->").map(|end| &comment[end + 3..])
+        } else if let Some(instruction) = rest.strip_prefix("<?") {
+            // The HTML parser ends a processing instruction at the first `>`.
+            instruction.find('>').map(|end| &instruction[end + 1..])
+        } else {
+            break;
+        };
+        match skipped {
+            Some(after) => rest = after,
+            // Unclosed: everything after it is inside it, nothing opens.
+            None => return false,
+        }
+    }
+    opens_with(rest, "<!doctype") || opens_with(rest, "<html")
+}
+
+/// `text` starts with `prefix`, ASCII case ignored.
+fn opens_with(text: &str, prefix: &str) -> bool {
+    text.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
 #[cfg(test)]
@@ -341,6 +368,41 @@ mod tests {
             result, "<script>xss</script>",
             "Empty content-type = no sanitization"
         );
+    }
+
+    const DOCUMENT: &str = "<!DOCTYPE html><html><head><title>T</title><script nonce=\"n\">hydrate()</script></head><body><main><h1>Hi</h1></main></body></html>";
+
+    #[test]
+    fn a_document_behind_a_leading_comment_passes_through() {
+        let body = format!("<!-- rendered by inker -->\n{DOCUMENT}");
+        assert_eq!(sanitize_response(&body, "text/html"), body);
+    }
+
+    #[test]
+    fn a_document_behind_long_leading_white_space_passes_through() {
+        let body = format!("{}\n\n{DOCUMENT}", " ".repeat(20));
+        assert_eq!(sanitize_response(&body, "text/html"), body);
+    }
+
+    #[test]
+    fn a_document_behind_a_byte_order_mark_and_a_prolog_passes_through() {
+        let body = format!("\u{feff}<?xml version=\"1.0\"?>\n<!-- a --><!-- b -->{DOCUMENT}");
+        assert_eq!(sanitize_response(&body, "text/html"), body);
+        let bare = "\n<HTML lang=\"en\"><body><form></form></body></HTML>";
+        assert_eq!(sanitize_response(bare, "text/html"), bare);
+    }
+
+    #[test]
+    fn a_fragment_behind_a_comment_is_still_sanitized() {
+        let out = sanitize_response(
+            "<!-- partial --><p>Hi</p><script>alert(1)</script>",
+            "text/html",
+        );
+        assert!(!out.contains("<script"));
+        assert!(out.contains("<p>Hi</p>"));
+        // An unclosed comment hides nothing: the body is not a document.
+        let unclosed = sanitize_response("<!-- <!doctype html><script>x</script>", "text/html");
+        assert!(!unclosed.contains("<script"));
     }
 
     #[test]

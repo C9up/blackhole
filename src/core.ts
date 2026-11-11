@@ -166,6 +166,50 @@ export function rateLimitHeaders(
 	};
 }
 
+/** What the store-backed rate limit lets through: the budget to report. */
+export interface StoreRateLimitPass {
+	kind: "pass";
+	headers: Record<string, string>;
+}
+
+/**
+ * The rate limit counted in the configured store (`rateLimit.store`): the
+ * refusal to answer, or the `X-RateLimit-*` headers for the response.
+ *
+ * A request without a key is refused, 400 `E_BLACKHOLE_MISSING_IP`, exactly
+ * as the engine refuses it: counted under `""`, every such request — a host
+ * that exposes no client address, a `keyFor` that answers nothing — would
+ * share one bucket, and one client would spend the budget of all of them.
+ */
+export async function runStoreRateLimit(
+	bh: Blackhole,
+	key: string,
+): Promise<RejectOutcome | StoreRateLimitPass> {
+	if (key === "") {
+		return {
+			kind: "reject",
+			status: 400,
+			body: {
+				error: {
+					code: "E_BLACKHOLE_MISSING_IP",
+					message: "Cannot rate-limit: no remote address",
+				},
+			},
+		};
+	}
+	const decision = await bh.checkRateLimit(key);
+	const headers = rateLimitHeaders(decision);
+	if (decision.allowed) return { kind: "pass", headers };
+	return {
+		kind: "reject",
+		status: 429,
+		body: {
+			error: { code: "E_BLACKHOLE_RATE_LIMITED", message: "Too many requests" },
+		},
+		headers: { ...headers, "Retry-After": String(decision.resetSeconds) },
+	};
+}
+
 /**
  * Normalise a rejection's `X-RateLimit-Reset` (the engine emits raw seconds) to
  * an ISO-8601 timestamp so both the success and 429 paths agree (limiter parity).

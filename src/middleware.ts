@@ -22,10 +22,10 @@ import {
 	type CoreRequest,
 	type CsrfOutcomeCookie,
 	csrfBodyString,
-	rateLimitHeaders,
 	runCsrfPhase,
 	runGuardPhase,
 	runResponsePhase,
+	runStoreRateLimit,
 } from "./core.js";
 import {
 	type Blackhole,
@@ -202,25 +202,18 @@ async function guard(
 	// Distributed store path: count + decide in JS (Redis, etc.) so the limit is
 	// shared across instances — the Rust in-process counter is off in this mode.
 	if (countHere && bh.hasRateLimitStore()) {
-		const decision = await bh.checkRateLimit(rateLimitKey);
-		const rlHeaders = rateLimitHeaders(decision);
-		if (!decision.allowed) {
-			ctx.response.header("Retry-After", String(decision.resetSeconds));
-			for (const [name, value] of Object.entries(rlHeaders)) {
+		const counted = await runStoreRateLimit(bh, rateLimitKey);
+		if (counted.kind === "reject") {
+			for (const [name, value] of Object.entries(counted.headers ?? {})) {
 				ctx.response.header(name, value);
 			}
 			applySecurityHeaders(ctx, bh);
-			ctx.response.status(429);
-			ctx.response.json({
-				error: {
-					code: "E_BLACKHOLE_RATE_LIMITED",
-					message: "Too many requests",
-				},
-			});
+			ctx.response.status(counted.status);
+			ctx.response.json(counted.body);
 			return true;
 		}
 		// Allowed: surface the budget on the successful response below.
-		for (const [name, value] of Object.entries(rlHeaders)) {
+		for (const [name, value] of Object.entries(counted.headers)) {
 			ctx.response.header(name, value);
 		}
 	}

@@ -1457,6 +1457,11 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 					"[blackhole] checkRateLimit called without a configured rateLimit.store.",
 				);
 			}
+			if (key === "") {
+				throw new Error(
+					"[blackhole] checkRateLimit was given an empty key: every request without one would be counted in a single shared bucket.",
+				);
+			}
 			const { count, resetSeconds } = await rateLimit.store.increment(
 				key,
 				rateLimit.windowSeconds,

@@ -14,10 +14,10 @@ import {
 	appendVaryValue,
 	type CoreRequest,
 	csrfBodyString,
-	rateLimitHeaders,
 	rawPathOf,
 	runRequestPhase,
 	runResponsePhase,
+	runStoreRateLimit,
 	serializeCookie,
 } from "./core.js";
 import {
@@ -136,23 +136,16 @@ export function blackholeExpress(options: BlackholeOptions = {}) {
 		const rlCtx: RateLimitContext = { request: { ip: () => remoteAddr } };
 		const rateLimitKey = bh.rateLimitKey(rlCtx);
 		if (bh.hasRateLimitStore()) {
-			const decision = await bh.checkRateLimit(rateLimitKey);
-			const rlHeaders = rateLimitHeaders(decision);
-			if (!decision.allowed) {
-				res.setHeader("Retry-After", String(decision.resetSeconds));
-				for (const [name, value] of Object.entries(rlHeaders)) {
+			const counted = await runStoreRateLimit(bh, rateLimitKey);
+			if (counted.kind === "reject") {
+				for (const [name, value] of Object.entries(counted.headers ?? {})) {
 					res.setHeader(name, value);
 				}
 				setSecurityHeaders(res, bh);
-				res.status(429).json({
-					error: {
-						code: "E_BLACKHOLE_RATE_LIMITED",
-						message: "Too many requests",
-					},
-				});
+				res.status(counted.status).json(counted.body);
 				return;
 			}
-			for (const [name, value] of Object.entries(rlHeaders)) {
+			for (const [name, value] of Object.entries(counted.headers)) {
 				res.setHeader(name, value);
 			}
 		}

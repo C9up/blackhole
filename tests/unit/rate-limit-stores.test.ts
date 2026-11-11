@@ -3,11 +3,13 @@ import BlackholeProvider, {
 	type BlackholeAppContext,
 } from "../../src/BlackholeProvider.js";
 import type { BlackholeConfig } from "../../src/config.js";
+import { createBlackhole } from "../../src/index.js";
 import {
 	MemoryRateLimitStore,
 	RedisRateLimitStore,
 	stores,
 } from "../../src/stores.js";
+import { ADAPTERS, viaAdapter } from "./support/adapters.js";
 
 /**
  * `{ default, stores }` under `rateLimit`, and the two counters blackhole now
@@ -214,5 +216,48 @@ describe("blackhole > rate-limit stores", () => {
 				}),
 			).not.toThrow();
 		});
+	});
+});
+
+describe("blackhole > a store never counts a request without a key", () => {
+	const options = {
+		csrf: false,
+		rateLimit: {
+			max: 2,
+			windowSeconds: 60,
+			keyFor: () => "",
+			store: new MemoryRateLimitStore(),
+		},
+	};
+
+	for (const adapter of ADAPTERS) {
+		it(`refuses it with 400 E_BLACKHOLE_MISSING_IP on ${adapter}, as the engine does`, async () => {
+			for (let i = 0; i < 3; i++) {
+				const res = await viaAdapter(adapter, options, { target: "/" });
+				expect(res.status).toBe(400);
+				expect(res.body).toMatchObject({
+					error: { code: "E_BLACKHOLE_MISSING_IP" },
+				});
+				expect(res.routeRan).toBe(false);
+			}
+		});
+	}
+
+	it("is refused by checkRateLimit itself", async () => {
+		const bh = createBlackhole(options);
+		await expect(bh.checkRateLimit("")).rejects.toThrow(/empty/);
+	});
+
+	it("still counts a request that has one", async () => {
+		const bh = createBlackhole({
+			csrf: false,
+			rateLimit: {
+				max: 1,
+				windowSeconds: 60,
+				store: new MemoryRateLimitStore(),
+			},
+		});
+		expect((await bh.checkRateLimit("203.0.113.7")).allowed).toBe(true);
+		expect((await bh.checkRateLimit("203.0.113.7")).allowed).toBe(false);
 	});
 });

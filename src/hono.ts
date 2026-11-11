@@ -20,10 +20,10 @@ import {
 	appendVaryValue,
 	type CoreRequest,
 	csrfBodyString,
-	rateLimitHeaders,
 	rawPathOf,
 	runRequestPhase,
 	runResponsePhase,
+	runStoreRateLimit,
 	serializeCookie,
 } from "./core.js";
 import { type BlackholeOptions, createBlackhole } from "./index.js";
@@ -124,24 +124,14 @@ export function blackholeHono(
 		// Distributed store: count + decide in JS, as the other adapters do.
 		let storeHeaders: Record<string, string> = {};
 		if (bh.hasRateLimitStore()) {
-			const decision = await bh.checkRateLimit(rateLimitKey);
-			storeHeaders = rateLimitHeaders(decision);
-			if (!decision.allowed) {
-				return refusal(
-					429,
-					{
-						error: {
-							code: "E_BLACKHOLE_RATE_LIMITED",
-							message: "Too many requests",
-						},
-					},
-					{
-						...storeHeaders,
-						"retry-after": String(decision.resetSeconds),
-						...bh.securityHeaders(),
-					},
-				);
+			const counted = await runStoreRateLimit(bh, rateLimitKey);
+			if (counted.kind === "reject") {
+				return refusal(counted.status, counted.body, {
+					...counted.headers,
+					...bh.securityHeaders(),
+				});
 			}
+			storeHeaders = counted.headers;
 		}
 
 		const target = nodeRequestTarget(c.env);

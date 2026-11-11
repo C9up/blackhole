@@ -913,7 +913,10 @@ export type XssOptInAttribute = "id" | "is" | "slot" | "part" | "data-*";
 
 /** XSS response sanitization, in its object form. */
 export interface XssConfig {
-	/** Sanitize `text/html` fragments (default: true). */
+	/**
+	 * Sanitize every `text/html` fragment the application sends (default:
+	 * true in the object form, which is how it is turned on).
+	 */
 	enabled?: boolean;
 	/**
 	 * Attributes the sanitizer keeps although it drops them by default: `id`
@@ -927,8 +930,12 @@ export interface XssConfig {
 
 export interface BlackholeOptions extends SecurityHeadersOptions {
 	/**
-	 * XSS response sanitization of `text/html` fragments (default: true).
-	 * `false` turns it off; an object keeps it on and opts attributes back in.
+	 * Sanitize every `text/html` fragment the application sends as untrusted
+	 * markup (default: false). On, a fragment keeps only the sanitizer's
+	 * allow-list: forms, inputs, buttons, SVG and media are removed, so turn
+	 * it on only where every fragment may carry untrusted markup. An object
+	 * turns it on and opts attributes back in. A full document is never
+	 * touched, and `sanitizeResponse()` cleans a given body whatever this says.
 	 */
 	xss?: boolean | XssConfig;
 	/** CSRF validation — `true`/`false` to toggle, or an object for fine-grained control. */
@@ -1029,8 +1036,14 @@ export interface Blackhole {
 	 * secret) when one is given, so it verifies for that session only.
 	 */
 	generateCsrfToken(binding?: string): string;
-	/** Sanitize an outgoing response body based on content type. */
+	/**
+	 * Sanitize `body` as untrusted markup when `contentType` is `text/html`
+	 * (a full document excepted); any other type comes back unchanged. Always,
+	 * whatever `xss` says — what an application calls on input it stores.
+	 */
 	sanitizeResponse(body: string, contentType: string): string;
+	/** Whether the response phase sanitizes the application's `text/html` fragments (`xss`). */
+	xssEnabled(): boolean;
 	/**
 	 * Protective response headers (Helmet-style), computed from config. Pass a
 	 * `nonce` to substitute the `@nonce` CSP token with `'nonce-<nonce>'`.
@@ -1302,7 +1315,7 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 	const xss: XssConfig =
 		typeof options.xss === "object"
 			? options.xss
-			: { enabled: options.xss ?? true };
+			: { enabled: options.xss ?? false };
 	// Fail closed: signed double-submit needs a secret. Silently falling back to
 	// an unsigned token (or a per-process ephemeral key that breaks multi-instance
 	// verification) would be a quiet downgrade — exactly what we refuse to ship.
@@ -1325,8 +1338,11 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 	const rateLimit = options.rateLimit;
 	const useRustLimiter =
 		rateLimit !== undefined && rateLimit.store === undefined;
+	// Off unless asked: on, the sanitizer strips the application's own forms
+	// and media from every fragment it sends. Upstream has no response
+	// sanitizer at all; blackhole keeps it as an opt-in.
+	const xssEnabled = xss.enabled ?? true;
 	const filter = new native.Blackhole(
-		xss.enabled ?? true,
 		csrf.enabled,
 		useRustLimiter ? rateLimit?.max : undefined,
 		useRustLimiter ? rateLimit?.windowSeconds : undefined,
@@ -1370,6 +1386,9 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		},
 		sanitizeResponse(body: string, contentType: string) {
 			return filter.sanitizeResponse(body, contentType);
+		},
+		xssEnabled() {
+			return xssEnabled;
 		},
 		securityHeaders(nonce?: string) {
 			if (!cspHasNonce || baseCsp === undefined) return baseHeaders;

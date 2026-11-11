@@ -27,6 +27,8 @@ export interface AdapterRequest {
 	routePattern?: string;
 	/** Headers the route handler sets on its response. */
 	routeHeaders?: Record<string, string>;
+	/** An HTML body the route sends as `text/html` (`ok` as text otherwise). */
+	routeBody?: string;
 }
 
 export interface AdapterResult {
@@ -34,6 +36,8 @@ export interface AdapterResult {
 	headers: Record<string, string>;
 	body: unknown;
 	routeRan: boolean;
+	/** The body that went out, when the route answered with text. */
+	sentBody?: string;
 }
 
 export type AdapterName = "ream" | "express" | "fastify" | "hono";
@@ -68,12 +72,17 @@ async function viaReam(
 		for (const [name, value] of Object.entries(req.routeHeaders ?? {})) {
 			built.ctx.response.header(name, value);
 		}
+		if (req.routeBody !== undefined) {
+			built.ctx.response.header("content-type", "text/html; charset=utf-8");
+			built.ctx.response.send(req.routeBody);
+		}
 	});
 	return {
 		status: built.spy.status,
 		headers: built.spy.headers,
 		body: built.spy.json,
 		routeRan,
+		sentBody: built.ctx.response.getBody(),
 	};
 }
 
@@ -84,6 +93,7 @@ async function viaExpress(
 	const headers: Record<string, string> = {};
 	let status = 200;
 	let body: unknown;
+	let sentBody: string | undefined;
 	let routeRan = false;
 	const res = {
 		headersSent: false,
@@ -103,6 +113,7 @@ async function viaExpress(
 		},
 		send(data?: unknown): unknown {
 			body = data;
+			if (typeof data === "string") sentBody = data;
 			return undefined;
 		},
 	};
@@ -125,10 +136,13 @@ async function viaExpress(
 			for (const [name, value] of Object.entries(req.routeHeaders ?? {})) {
 				res.setHeader(name, value);
 			}
-			res.send("ok");
+			if (req.routeBody !== undefined) {
+				res.setHeader("content-type", "text/html; charset=utf-8");
+			}
+			res.send(req.routeBody ?? "ok");
 		},
 	);
-	return { status, headers, body, routeRan };
+	return { status, headers, body, routeRan, sentBody };
 }
 
 type FastifyHook = (
@@ -201,9 +215,22 @@ async function viaFastify(
 		for (const [name, value] of Object.entries(req.routeHeaders ?? {})) {
 			reply.header(name, value);
 		}
+		if (req.routeBody !== undefined) {
+			reply.header("content-type", "text/html; charset=utf-8");
+		}
 	}
-	await hooks.get("onSend")?.(request, reply, routeRan ? "ok" : body);
-	return { status, headers, body, routeRan };
+	const answered = await hooks.get("onSend")?.(
+		request,
+		reply,
+		routeRan ? (req.routeBody ?? "ok") : body,
+	);
+	return {
+		status,
+		headers,
+		body,
+		routeRan,
+		sentBody: typeof answered === "string" ? answered : undefined,
+	};
 }
 
 async function viaHono(
@@ -225,7 +252,7 @@ async function viaHono(
 		for (const [name, value] of Object.entries(req.routeHeaders ?? {})) {
 			c.header(name, value);
 		}
-		return c.text("ok");
+		return req.routeBody === undefined ? c.text("ok") : c.html(req.routeBody);
 	});
 	const response = await app.request(
 		`http://localhost${req.target}`,
@@ -244,7 +271,7 @@ async function viaHono(
 	} catch {
 		// A plain-text body stays as it is.
 	}
-	return { status: response.status, headers, body, routeRan };
+	return { status: response.status, headers, body, routeRan, sentBody: text };
 }
 
 /** Send `req` through `adapter` configured with `options`. */

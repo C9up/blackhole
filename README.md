@@ -140,10 +140,24 @@ without a word.
 
 ## XSS
 
-`text/html` fragments are sanitized on the way out (full documents are left
-alone). Untrusted markup loses `id`, `is`, `slot`, `part` and `data-*` — DOM
-clobbering, customized elements, framework bindings, shadow DOM. Opt back in
-only when nothing reads them from untrusted markup:
+`sanitizeResponse(body, contentType)` cleans a `text/html` body as untrusted
+markup — what to call on user input before storing or echoing it:
+
+```ts
+const safe = blackhole.sanitizeResponse(comment.body, 'text/html')
+```
+
+The sanitizer keeps an allow-list of safe tags: scripts, styles, frames and
+event handlers go, and so do forms, inputs, buttons, SVG and media. Untrusted
+markup also loses `id`, `is`, `slot`, `part` and `data-*` — DOM clobbering,
+customized elements, framework bindings, shadow DOM.
+
+`xss: true` runs the same pass over every `text/html` fragment the application
+sends (full documents are left alone). It is off by default: the application's
+own partials — an HTMX form, an `<svg>` icon, a `<video>` — would lose
+everything outside the allow-list. Turn it on only where every fragment may
+carry untrusted markup; the object form turns it on and opts attributes back
+in, for when nothing reads them from untrusted markup:
 
 ```ts
 xss: { allowAttributes: ['id', 'data-*'] }

@@ -103,7 +103,7 @@ describe("blackhole > blackholeHono", () => {
 	});
 
 	it("sanitizes an HTML fragment and sets the headers on it", async () => {
-		const res = await app().request("http://app.test/page");
+		const res = await app({ xss: true }).request("http://app.test/page");
 		const html = await res.text();
 		expect(html).toContain("<p>hi</p>");
 		expect(html).not.toContain("<script>");

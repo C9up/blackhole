@@ -3,11 +3,13 @@
  * under in the rate limit.
  */
 import { describe, expect, it } from "vitest";
+import { runResponsePhase } from "../../src/core.js";
 import { clientKey, createBlackhole } from "../../src/index.js";
 import {
 	hasFunctions,
 	loadNativeBinary,
 } from "../../src/vendor/nativeBinary.js";
+import { ADAPTERS, viaAdapter } from "./support/adapters.js";
 
 const FRAGMENT =
 	'<a id="config" is="x-y" slot="s" part="p" data-bind="x" class="c" href="/x">l</a>';
@@ -51,7 +53,6 @@ describe("blackhole > XSS sanitizer attributes", () => {
 		expect(
 			() =>
 				new Blackhole(
-					true,
 					false,
 					undefined,
 					undefined,
@@ -68,9 +69,20 @@ describe("blackhole > XSS sanitizer attributes", () => {
 
 	it("turns the pass off with enabled: false", () => {
 		const bh = createBlackhole({ csrf: false, xss: { enabled: false } });
-		expect(bh.sanitizeResponse("<script>x</script>", "text/html")).toBe(
-			"<script>x</script>",
-		);
+		expect(bh.xssEnabled()).toBe(false);
+		const out = runResponsePhase(bh, {
+			body: "<script>x</script>",
+			contentType: "text/html",
+		});
+		expect(out.body).toBe("<script>x</script>");
+	});
+
+	it("turns the pass on with the object form", () => {
+		const bh = createBlackhole({
+			csrf: false,
+			xss: { allowAttributes: ["id"] },
+		});
+		expect(bh.xssEnabled()).toBe(true);
 	});
 });
 
@@ -123,5 +135,57 @@ describe("blackhole > rate-limit client key", () => {
 			}).status;
 		});
 		expect(statuses).toEqual([undefined, undefined, 429]);
+	});
+});
+
+describe("blackhole > the app's own HTML is not sanitized unless asked", () => {
+	const FORM =
+		'<section><form method="post" action="/save"><input type="hidden" name="_csrf" value="abc"><label>Name <input name="name"></label><select name="x"><option>1</option></select><textarea name="t"></textarea><button type="submit">Save</button></form></section>';
+	const MEDIA =
+		'<div><svg width="10"><circle r="1"></circle></svg><video src="/v.mp4"></video></div>';
+
+	it("serves a form fragment and a media fragment as written by default", () => {
+		const bh = createBlackhole({ csrf: false });
+		for (const body of [FORM, MEDIA]) {
+			const out = runResponsePhase(bh, {
+				body,
+				contentType: "text/html; charset=utf-8",
+			});
+			expect(out.body).toBe(body);
+		}
+	});
+
+	it("serves them as written through every adapter", async () => {
+		for (const adapter of ADAPTERS) {
+			const res = await viaAdapter(
+				adapter,
+				{ csrf: false },
+				{ target: "/", routeBody: FORM },
+			);
+			expect(res.sentBody).toBe(FORM);
+		}
+	});
+
+	it("sanitizes every fragment on the way out once `xss` is on", () => {
+		const bh = createBlackhole({ csrf: false, xss: true });
+		const out = runResponsePhase(bh, {
+			body: `${FORM}<script>alert(1)</script>`,
+			contentType: "text/html",
+		});
+		expect(out.body).not.toContain("<script");
+		expect(out.body).not.toContain("<form");
+	});
+
+	it("still sanitizes what the app hands `sanitizeResponse` itself", () => {
+		// The explicit call is how untrusted input is cleaned before it is
+		// stored: it must not depend on the automatic pass being on.
+		const bh = createBlackhole({ csrf: false });
+		const out = bh.sanitizeResponse(
+			'<p onclick="x()">hi</p><script>alert(1)</script>',
+			"text/html",
+		);
+		expect(out).not.toContain("<script");
+		expect(out).not.toContain("onclick");
+		expect(out).toContain("<p>hi</p>");
 	});
 });

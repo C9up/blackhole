@@ -6,7 +6,6 @@
 
 export declare class Blackhole {
 	constructor(
-		xssEnabled?: boolean | undefined | null,
 		csrfEnabled?: boolean | undefined | null,
 		rateLimitMax?: number | undefined | null,
 		rateLimitWindow?: number | undefined | null,
@@ -53,8 +52,12 @@ export declare class Blackhole {
 		csrfEnforced?: boolean;
 	};
 	/**
-	 * Sanitize an outgoing response body (XSS protection for HTML/text responses).
-	 * Respects the `xss_enabled` config — returns body unchanged when XSS is disabled.
+	 * Sanitize a body as untrusted markup when `content_type` is `text/html`
+	 * (a full document excepted); any other type comes back unchanged.
+	 *
+	 * Always, whatever the `xss` option says: that option decides whether
+	 * the host runs this on its own responses, while a direct call is how an
+	 * application cleans input it is about to store.
 	 */
 	sanitizeResponse(body: string, contentType: string): string;
 }

@@ -16,7 +16,8 @@ import BlackholeMiddleware, {
 // (Ream's per-request IoC resolver) — NOT from a `@c9up/ream` import. One shared
 // instance, wired into a fake resolver per context, so every test sees the same
 // config and the suite stays agnostic / standalone.
-const bh = createBlackhole({ secret: SECRET });
+// `xss` on: several tests below are about what the response pass sanitizes.
+const bh = createBlackhole({ secret: SECRET, xss: true });
 
 interface ResponseSpy {
 	status?: number;

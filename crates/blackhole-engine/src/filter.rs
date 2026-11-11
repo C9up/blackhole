@@ -9,7 +9,6 @@ use crate::{FilterResult, Request, Response};
 
 /// Configuration for the Blackhole security filter.
 pub struct BlackholeConfig {
-    pub xss_enabled: bool,
     pub csrf_enabled: bool,
     pub rate_limit: Option<(u32, u64)>,
     pub path_traversal: bool,
@@ -32,7 +31,6 @@ pub struct BlackholeConfig {
 impl Default for BlackholeConfig {
     fn default() -> Self {
         Self {
-            xss_enabled: true,
             csrf_enabled: true,
             rate_limit: None,
             path_traversal: true,

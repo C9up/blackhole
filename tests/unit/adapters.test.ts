@@ -124,7 +124,7 @@ describe("blackhole > blackholeExpress", () => {
 	});
 
 	it("sanitizes a text/html response + sets security headers via the send wrapper", () => {
-		const mw = blackholeExpress({ csrf: false });
+		const mw = blackholeExpress({ csrf: false, xss: true });
 		const { req, res, spy } = mockExpress({ method: "GET" });
 		mw(req, res, () => {
 			res.setHeader("content-type", "text/html");
@@ -139,7 +139,7 @@ describe("blackhole > blackholeExpress", () => {
 	// was NOT sanitized (ct read as "" before Express applies its text/html
 	// default), making the headline XSS guard a no-op for the common case.
 	it("sanitizes a plain string res.send() even without an explicit content-type", () => {
-		const mw = blackholeExpress({ csrf: false });
+		const mw = blackholeExpress({ csrf: false, xss: true });
 		const { req, res, spy } = mockExpress({ method: "GET" });
 		mw(req, res, () => {
 			res.send("<p>ok</p><script>alert(1)</script>");
@@ -276,7 +276,9 @@ describe("blackhole > blackholeFastify", () => {
 	});
 
 	it("sanitizes a text/html payload + sets security headers in onSend", async () => {
-		const { onSend } = await registerFastify(blackholeFastify({ csrf: false }));
+		const { onSend } = await registerFastify(
+			blackholeFastify({ csrf: false, xss: true }),
+		);
 		const { reply } = mockReply();
 		reply.header("content-type", "text/html");
 		const request: FastifyReqLike = { method: "GET", url: "/", headers: {} };

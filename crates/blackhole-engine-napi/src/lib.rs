@@ -21,7 +21,6 @@ impl Blackhole {
     #[allow(clippy::too_many_arguments)]
     #[napi(constructor)]
     pub fn new(
-        xss_enabled: Option<bool>,
         csrf_enabled: Option<bool>,
         rate_limit_max: Option<u32>,
         rate_limit_window: Option<u32>,
@@ -60,7 +59,6 @@ impl Blackhole {
         };
         Ok(Self {
             filter: blackhole_engine::BlackholeFilter::new(blackhole_engine::BlackholeConfig {
-                xss_enabled: xss_enabled.unwrap_or(true),
                 csrf_enabled: csrf_enabled.unwrap_or(true),
                 rate_limit,
                 path_traversal: path_traversal.unwrap_or(true),
@@ -176,13 +174,14 @@ impl Blackhole {
         }
     }
 
-    /// Sanitize an outgoing response body (XSS protection for HTML/text responses).
-    /// Respects the `xss_enabled` config — returns body unchanged when XSS is disabled.
+    /// Sanitize a body as untrusted markup when `content_type` is `text/html`
+    /// (a full document excepted); any other type comes back unchanged.
+    ///
+    /// Always, whatever the `xss` option says: that option decides whether
+    /// the host runs this on its own responses, while a direct call is how an
+    /// application cleans input it is about to store.
     #[napi]
     pub fn sanitize_response(&self, body: String, content_type: String) -> String {
-        if !self.filter.config().xss_enabled {
-            return body;
-        }
         blackhole_engine::xss::sanitize_response_with(
             &body,
             &content_type,

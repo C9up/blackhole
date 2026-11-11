@@ -5,7 +5,6 @@
  *   // config/blackhole.ts
  *   import { defineConfig } from '@c9up/blackhole'
  *   export default defineConfig({
- *     xss: true,
  *     csrf: true,
  *     rateLimit: { max: 100, windowSeconds: 60 },
  *   })
@@ -30,8 +29,9 @@ import type { RateLimitStoreFactory } from "./stores.js";
  */
 export interface BlackholeConfig extends SecurityHeadersOptions {
 	/**
-	 * XSS response sanitization of `text/html` fragments (default: true).
-	 * `false` turns it off; an object keeps it on and opts attributes back in.
+	 * Sanitize every `text/html` fragment the application sends as untrusted
+	 * markup (default: false) — forms, inputs and media included, which is
+	 * why it is off. An object turns it on and opts attributes back in.
 	 */
 	xss?: boolean | XssConfig;
 	/** CSRF validation — `true`/`false` to toggle, or an object (exceptRoutes, methods, cookie). */

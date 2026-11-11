@@ -20,6 +20,7 @@ import { BLACKHOLE_KEY } from "./BlackholeProvider.js";
 import {
 	appendVaryValue,
 	type CoreRequest,
+	type CsrfOutcomeCookie,
 	csrfBodyString,
 	rateLimitHeaders,
 	runCsrfPhase,
@@ -262,28 +263,97 @@ async function guard(
 /** Where the session keeps the secret its CSRF tokens are bound to. */
 const CSRF_SECRET_SESSION_KEY = "csrf-secret";
 
+/** The request's session, as far as its CSRF secret is concerned. */
+interface CsrfSession {
+	/** The secret the session's tokens are bound to, created on first use. */
+	secret(): string;
+	/** A new secret: every token bound to the previous one is refused from now on. */
+	rotate(): string;
+	/** The session's id, which changes when the host regenerates the session. */
+	id(): unknown;
+}
+
 /**
- * The session's CSRF secret, created on first use — or `undefined` when the
- * request has no session (no session middleware, or one registered after
- * this one), in which case tokens are signed but bound to nothing.
+ * The request's session (`ctx.session`, read structurally), or `undefined`
+ * when the request has none — no session middleware, or one registered after
+ * this one. Whether that is acceptable is `csrf.session`'s call, made in the
+ * CSRF phase.
  *
  * Binding the token to the session is what makes a leaked token worthless
  * elsewhere: issued under one session's secret, it is refused under any
  * other, and it dies with the session that holds the secret.
  */
-function sessionCsrfBinding(ctx: ReamContext): string | undefined {
+function csrfSessionOf(ctx: ReamContext): CsrfSession | undefined {
 	const session: unknown = Reflect.get(Object(ctx), "session");
 	if (typeof session !== "object" || session === null) return undefined;
 	const get: unknown = Reflect.get(session, "get");
 	const put: unknown = Reflect.get(session, "put");
 	if (typeof get !== "function" || typeof put !== "function") return undefined;
-	const stored: unknown = Reflect.apply(get, session, [
-		CSRF_SECRET_SESSION_KEY,
-	]);
-	if (typeof stored === "string" && stored.length > 0) return stored;
-	const secret = randomBytes(32).toString("base64url");
-	Reflect.apply(put, session, [CSRF_SECRET_SESSION_KEY, secret]);
-	return secret;
+	const rotate = (): string => {
+		const secret = randomBytes(32).toString("base64url");
+		Reflect.apply(put, session, [CSRF_SECRET_SESSION_KEY, secret]);
+		return secret;
+	};
+	return {
+		secret() {
+			const stored: unknown = Reflect.apply(get, session, [
+				CSRF_SECRET_SESSION_KEY,
+			]);
+			return typeof stored === "string" && stored.length > 0
+				? stored
+				: rotate();
+		},
+		rotate,
+		id: () => Reflect.get(session, "sessionId"),
+	};
+}
+
+/**
+ * Hand the request its CSRF token: `request.csrfToken`, the store (for
+ * templating), and the readable cookie when one is to be set.
+ */
+function seedCsrfToken(
+	ctx: ReamContext,
+	token: string,
+	cookie: CsrfOutcomeCookie | undefined,
+): void {
+	ctx.request.csrfToken = token;
+	ctx.store.set("csrfToken", token);
+	if (cookie === undefined) return;
+	// plainCookie: the XSRF token is already HMAC-signed by blackhole; the
+	// browser must read the raw value for the double-submit check, so it must
+	// not be re-signed by the host's default (signing) `cookie()`.
+	ctx.response.plainCookie(
+		cookie.name,
+		cookie.value,
+		// `encode: false`: the browser reads this cookie and echoes it in a
+		// header for the double-submit check, so both sides must see the SAME
+		// bytes. A packed envelope would be echoed packed and never match.
+		{ ...cookie.options, encode: false },
+	);
+}
+
+/**
+ * The session was regenerated while the request ran — a login or a logout.
+ * Its data survives a regeneration, the CSRF secret included, so without this
+ * a token issued before the boundary stayed valid after it. The secret is
+ * replaced, and the response carries a token bound to the new one.
+ *
+ * NAMED DEVIATION: the upstream guard keeps one secret for the life of the
+ * session; blackhole turns it over at every regeneration.
+ */
+function rotateCsrfSecret(
+	ctx: ReamContext,
+	bh: Blackhole,
+	session: CsrfSession,
+): void {
+	const token = bh.generateCsrfToken(session.rotate());
+	const { name, options } = bh.csrfCookie();
+	seedCsrfToken(
+		ctx,
+		token,
+		bh.xsrfCookieEnabled() ? { name, value: token, options } : undefined,
+	);
 }
 
 /** The engine's view of a Ream request. */
@@ -343,10 +413,9 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 		if (await guard(ctx, bh, ["rateLimit"])) return;
 	}
 
-	const outcome = runCsrfPhase(
-		bh,
-		coreRequest(ctx, "", sessionCsrfBinding(ctx)),
-	);
+	const session = csrfSessionOf(ctx);
+	const sessionId = session?.id();
+	const outcome = runCsrfPhase(bh, coreRequest(ctx, "", session?.secret()));
 	if (outcome.kind === "reject") {
 		applySecurityHeaders(ctx, bh);
 		const body = translateCsrfRejection(ctx, outcome.body);
@@ -358,25 +427,11 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 
 	// Pass: seed the CSRF token (both `request.csrfToken` and `ctx.store` for
 	// templating), the XSRF-TOKEN cookie, and the CSP nonce.
-	ctx.request.csrfToken = outcome.csrfToken;
-	ctx.store.set("csrfToken", outcome.csrfToken);
+	seedCsrfToken(ctx, outcome.csrfToken, outcome.setCookie);
 	// The enforce signal (fail-close), distinct from the seeded token above: `true`
 	// only when CSRF was enabled, guarded, non-excepted, AND validated. NOT mirrored
 	// to `ctx.store` — the store's token is for the ALS-based inker `csrfField()`.
 	ctx.request.csrfProtected = outcome.csrfProtected;
-	if (outcome.setCookie) {
-		// plainCookie: the XSRF token is already HMAC-signed by blackhole; the
-		// browser must read the raw value for the double-submit check, so it must
-		// not be re-signed by the host's default (signing) `cookie()`.
-		ctx.response.plainCookie(
-			outcome.setCookie.name,
-			outcome.setCookie.value,
-			// `encode: false`: the browser reads this cookie and echoes it in a
-			// header for the double-submit check, so both sides must see the SAME
-			// bytes. A packed envelope would be echoed packed and never match.
-			{ ...outcome.setCookie.options, encode: false },
-		);
-	}
 	if (outcome.cspNonce) {
 		ctx.response.nonce = outcome.cspNonce;
 		ctx.store.set("cspNonce", outcome.cspNonce);
@@ -393,6 +448,10 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 	applySecurityHeaders(ctx, bh, outcome.cspNonce);
 
 	await next();
+
+	if (session !== undefined && session.id() !== sessionId) {
+		rotateCsrfSecret(ctx, bh, session);
+	}
 
 	const { headers, body } = runResponsePhase(bh, {
 		body: ctx.response.getBody(),

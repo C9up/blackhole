@@ -355,8 +355,14 @@ describe("blackhole > configure", () => {
 				async addProvider(path: string) {
 					calls.push(`provider:${path}`);
 				},
-				async registerMiddleware(path: string, options?: { tier?: string }) {
+				async registerMiddleware(
+					path: string,
+					options?: { tier?: string; position?: string },
+				) {
 					calls.push(`middleware:${path}:${options?.tier ?? "default"}`);
+					if (options?.position !== undefined) {
+						calls.push(`position:${path}:${options.position}`);
+					}
 				},
 				async writeFile(path: string, content: string) {
 					calls.push(`file:${path}`);
@@ -395,6 +401,12 @@ describe("blackhole > configure", () => {
 			"middleware:@c9up/blackhole/server_middleware:server",
 		);
 		expect(calls).toContain("middleware:@c9up/blackhole/middleware:router");
+	});
+
+	it("puts the CSRF half after the router-tier middlewares already there, the session's included", async () => {
+		const { codemods, calls } = recorder();
+		await configure(codemods);
+		expect(calls).toContain("position:@c9up/blackhole/middleware:after");
 	});
 
 	it("writes a config with CSRF on", async () => {

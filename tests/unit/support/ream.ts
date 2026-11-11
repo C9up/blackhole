@@ -6,10 +6,23 @@ import { BLACKHOLE_KEY } from "../../../src/BlackholeProvider.js";
 import type { Blackhole } from "../../../src/index.js";
 import type { ReamContext } from "../../../src/middleware.js";
 
-/** A session that keeps what is put in it, and records flashes. */
+/**
+ * A session that keeps what is put in it, and records flashes. Like the host's,
+ * `regenerate()` gives it a new id and keeps its data.
+ */
 export class FakeSession {
 	readonly data = new Map<string, unknown>();
 	readonly flashes: unknown[][] = [];
+	#generation = 0;
+	readonly #prefix = Math.random().toString(36).slice(2);
+
+	get sessionId(): string {
+		return `${this.#prefix}-${this.#generation}`;
+	}
+
+	regenerate(): void {
+		this.#generation += 1;
+	}
 
 	get(key: string): unknown {
 		return this.data.get(key);

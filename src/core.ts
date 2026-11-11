@@ -6,6 +6,7 @@
  * duplicating the CORS → check → CSRF → headers → sanitize pipeline.
  */
 
+import { E_BLACKHOLE_SESSION_NOT_READY } from "./errors.js";
 import {
 	type Blackhole,
 	type BlackholeContext,
@@ -118,6 +119,13 @@ export interface GuardPass {
 	rateLimitHeaders?: Record<string, string>;
 }
 
+/** The readable `XSRF-TOKEN` cookie to set. */
+export interface CsrfOutcomeCookie {
+	name: string;
+	value: string;
+	options: Record<string, unknown>;
+}
+
 /** What the CSRF phase lets through: the token to publish, and the nonce. */
 export interface CsrfPass {
 	kind: "pass";
@@ -128,11 +136,7 @@ export interface CsrfPass {
 	 */
 	csrfProtected: boolean;
 	/** Present only when a fresh cookie must be set (none was sent). */
-	setCookie?: {
-		name: string;
-		value: string;
-		options: Record<string, unknown>;
-	};
+	setCookie?: CsrfOutcomeCookie;
 	cspNonce?: string;
 	/** Present when the rate limit was counted in this phase. */
 	rateLimitHeaders?: Record<string, string>;
@@ -352,6 +356,11 @@ export function runCsrfPhase(
 	req: CoreRequest,
 	rateLimit = false,
 ): CsrfOutcome {
+	// Bound to a session the request does not have: an unbound token here
+	// would be valid for every session, so nothing is minted or verified.
+	if (bh.csrfSessionRequired() && !req.csrfBinding) {
+		throw new E_BLACKHOLE_SESSION_NOT_READY();
+	}
 	const { name, options } = bh.csrfCookie();
 	const existing = usableCsrfToken(bh, req);
 	// A predicate `exceptRoutes`, or an entry naming the matched route's

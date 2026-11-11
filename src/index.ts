@@ -846,6 +846,22 @@ export interface CsrfConfig {
 	 * has no use for it, and not setting a cookie is one less thing to leak.
 	 */
 	enableXsrfCookie?: boolean;
+	/**
+	 * Bind every token to the request's session, and refuse a request that
+	 * reaches the check without one (`E_BLACKHOLE_SESSION_NOT_READY`).
+	 *
+	 * The Ream provider turns it on when the application has a session config
+	 * (`config/session.ts`), so a kernel that runs blackhole before the session
+	 * middleware fails loudly instead of issuing tokens bound to nothing.
+	 * Without it, a request that has a session is still bound to it, and one
+	 * without gets the stateless signed token. The standalone adapters have no
+	 * session: turning it on there refuses every request.
+	 *
+	 * NAMED DEVIATION: the upstream guard always reads the session and has no
+	 * stateless mode; blackhole keeps one for hosts without sessions, and this
+	 * switch is what makes the session mandatory where the app has one.
+	 */
+	session?: boolean;
 	/** Attributes for the seeded `XSRF-TOKEN` cookie. */
 	cookie?: CsrfCookieConfig;
 	/** AdonisJS spelling of {@link cookie}. Both are accepted. */
@@ -1049,6 +1065,11 @@ export interface Blackhole {
 	/** Whether the readable `XSRF-TOKEN` cookie should be seeded at all. */
 	xsrfCookieEnabled(): boolean;
 	/**
+	 * Whether CSRF is on and must be bound to a session (`csrf.session`): a
+	 * request without one is refused rather than given an unbound token.
+	 */
+	csrfSessionRequired(): boolean;
+	/**
 	 * Whether `exceptRoutes` exempts this request on what only JS knows: the
 	 * predicate, or an entry naming the matched route's pattern. The path
 	 * forms are applied by `check()` itself.
@@ -1196,6 +1217,7 @@ function resolveCsrf(csrf: boolean | CsrfConfig | undefined): {
 	methods: string[];
 	trustedOrigins: string[];
 	enableXsrfCookie: boolean;
+	session: boolean;
 	cookieOptions: Record<string, unknown>;
 } {
 	const cfg: CsrfConfig =
@@ -1221,6 +1243,7 @@ function resolveCsrf(csrf: boolean | CsrfConfig | undefined): {
 		methods: cfg.methods ?? [],
 		trustedOrigins: cfg.trustedOrigins ?? [],
 		enableXsrfCookie: cfg.enableXsrfCookie ?? true,
+		session: cfg.session ?? false,
 		cookieOptions: {
 			path: cookie.path ?? "/",
 			sameSite: cookie.sameSite ?? "lax",
@@ -1376,6 +1399,9 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		xsrfCookieEnabled() {
 			return csrf.enableXsrfCookie;
 		},
+		csrfSessionRequired() {
+			return csrf.enabled && csrf.session;
+		},
 		csrfExempt(ctx) {
 			if (csrf.exceptPredicate) return csrf.exceptPredicate(ctx);
 			// The path forms are applied inside the Rust check; the matched
@@ -1421,6 +1447,7 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 }
 
 export { clientKey } from "./clientKey.js";
+export { E_BLACKHOLE_SESSION_NOT_READY } from "./errors.js";
 export {
 	defineThrottle,
 	HttpLimiter,

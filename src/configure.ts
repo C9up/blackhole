@@ -18,7 +18,7 @@ interface Codemods {
 	addProvider(importPath: string): Promise<void>;
 	registerMiddleware(
 		importPath: string,
-		options?: { tier?: "server" | "router" },
+		options?: { tier?: "server" | "router"; position?: "before" | "after" },
 	): Promise<void>;
 	writeFile(
 		filePath: string,
@@ -42,8 +42,13 @@ export async function configure(codemods: Codemods): Promise<void> {
 	await codemods.registerMiddleware("@c9up/blackhole/server_middleware", {
 		tier: "server",
 	});
+	// At the END of the router tier: CSRF tokens are bound to the session,
+	// so this half runs after the session middleware. Inserted first, it would
+	// find no session, and with a session configured every request is refused
+	// (`E_BLACKHOLE_SESSION_NOT_READY`).
 	await codemods.registerMiddleware("@c9up/blackhole/middleware", {
 		tier: "router",
+		position: "after",
 	});
 
 	await codemods.makeUsingStub(stubsRoot, "config/blackhole.stub");

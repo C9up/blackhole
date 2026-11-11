@@ -76,6 +76,22 @@ function resolveRateLimit(
 	return { ...rest, store };
 }
 
+/**
+ * The CSRF options, bound to the session when the application has one
+ * configured (`config/session.ts`) and has not said otherwise: a kernel that
+ * then runs blackhole before the session middleware is refused at the first
+ * request, instead of issuing tokens bound to nothing.
+ */
+function bindCsrfToSession(
+	csrf: BlackholeConfig["csrf"],
+	hasSession: boolean,
+): BlackholeOptions["csrf"] {
+	if (typeof csrf === "object") {
+		return csrf.session === undefined ? { ...csrf, session: hasSession } : csrf;
+	}
+	return { enabled: csrf ?? true, session: hasSession };
+}
+
 export default class BlackholeProvider {
 	#limiter: LimiterManager | undefined;
 
@@ -102,7 +118,10 @@ export default class BlackholeProvider {
 			assertNoRetiredOptions(config);
 			return createBlackhole({
 				xss: config.xss,
-				csrf: config.csrf,
+				csrf: bindCsrfToSession(
+					config.csrf,
+					this.app.config.get("session") !== undefined,
+				),
 				rateLimit: resolveRateLimit(config.rateLimit),
 				pathTraversal: config.pathTraversal,
 				paramPollution: config.paramPollution,

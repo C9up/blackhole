@@ -96,6 +96,23 @@ describe("blackhole > object-form CSP", () => {
 		);
 	});
 
+	it("refuses a line break inside a source", () => {
+		// A CR/LF in the header value is a second header, or a split response
+		// on a host that does not validate.
+		for (const source of [
+			"'self'\r\nX-Injected: 1",
+			"'self'\nX: 1",
+			"'self'\r",
+		]) {
+			expect(() =>
+				createBlackhole({
+					csrf: false,
+					csp: { directives: { scriptSrc: [source] } },
+				}),
+			).toThrow(/invalid value/);
+		}
+	});
+
 	it("refuses an invalid directive name", () => {
 		expect(() => cspOf({ directives: { "script src": ["'self'"] } })).toThrow(
 			/invalid directive name/,
@@ -149,6 +166,17 @@ describe("blackhole > csp.policy (the string form)", () => {
 		expect(() => cspOf("default-src 'self'; script-src nonce-x")).toThrow(
 			/single-quoted/,
 		);
+	});
+
+	it("refuses a line break anywhere in the policy", () => {
+		for (const policy of [
+			"default-src 'self'\r\nX: 1",
+			"default-src 'self';\nimg-src 'self'",
+		]) {
+			expect(() => createBlackhole({ csrf: false, csp: { policy } })).toThrow(
+				/line break/,
+			);
+		}
 	});
 
 	it("refuses a directive given twice", () => {

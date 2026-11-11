@@ -183,12 +183,22 @@ jobs:
           path: index.${{ matrix.suffix }}.node
           if-no-files-found: error
 
+  # On every push, and a job `publish` needs: the matrix above runs only when
+  # the version moves, so a gate placed there alone would let a lint
+  # regression land on main and be found at release time.
   cargo-tests:
-    name: Cargo tests (linux-x64-gnu)
+    name: Cargo lint & tests (linux-x64-gnu)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      # Clippy as an error rather than a note. This engine reads hostile
+      # requests and sanitises untrusted markup; the lints that catch a panic
+      # on such input are worth more here than the ones that catch a style.
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
 
   # vitest on the host platform, on every push. The matrix above runs the

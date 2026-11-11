@@ -2,7 +2,7 @@
 
 > Rust-native security filter (XSS, CSRF, rate-limiting, CORS, security headers) for any Node.js framework.
 
-Part of **[Ream](https://github.com/C9up/ream)** — a Rust-powered, AdonisJS-compatible Node.js framework. Independent, publishable package.
+Part of **[Ream](https://github.com/C9up/ream)** — a Rust-powered Node.js framework with an IoC container, providers and a middleware kernel. Independent, publishable package.
 
 ## Installation
 

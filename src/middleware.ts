@@ -413,7 +413,8 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 		if (await guard(ctx, bh, ["rateLimit"])) return;
 	}
 
-	const session = csrfSessionOf(ctx);
+	// With CSRF off the session is left alone: no secret is written into it.
+	const session = bh.csrfEnabled() ? csrfSessionOf(ctx) : undefined;
 	const sessionId = session?.id();
 	const outcome = runCsrfPhase(bh, coreRequest(ctx, "", session?.secret()));
 	if (outcome.kind === "reject") {
@@ -427,7 +428,9 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 
 	// Pass: seed the CSRF token (both `request.csrfToken` and `ctx.store` for
 	// templating), the XSRF-TOKEN cookie, and the CSP nonce.
-	seedCsrfToken(ctx, outcome.csrfToken, outcome.setCookie);
+	if (outcome.csrfToken !== undefined) {
+		seedCsrfToken(ctx, outcome.csrfToken, outcome.setCookie);
+	}
 	// The enforce signal (fail-close), distinct from the seeded token above: `true`
 	// only when CSRF was enabled, guarded, non-excepted, AND validated. NOT mirrored
 	// to `ctx.store` — the store's token is for the ALS-based inker `csrfField()`.

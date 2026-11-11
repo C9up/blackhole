@@ -30,8 +30,11 @@ import { type BlackholeOptions, createBlackhole } from "./index.js";
 
 declare module "hono" {
 	interface ContextVariableMap {
-		/** This request's CSRF token (`c.get('csrfToken')`), for a form's `_csrf` field. */
-		csrfToken: string;
+		/**
+		 * This request's CSRF token (`c.get('csrfToken')`), for a form's `_csrf`
+		 * field. Absent when CSRF is off.
+		 */
+		csrfToken?: string;
 		/** This request's CSP nonce, when the CSP uses `@nonce`. */
 		cspNonce?: string;
 	}
@@ -175,7 +178,7 @@ export function blackholeHono(
 			});
 		}
 
-		c.set("csrfToken", outcome.csrfToken);
+		if (outcome.csrfToken !== undefined) c.set("csrfToken", outcome.csrfToken);
 		if (outcome.cspNonce) c.set("cspNonce", outcome.cspNonce);
 
 		// A route that throws still reaches here: Hono's compose hands the error

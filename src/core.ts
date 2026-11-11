@@ -129,7 +129,8 @@ export interface CsrfOutcomeCookie {
 /** What the CSRF phase lets through: the token to publish, and the nonce. */
 export interface CsrfPass {
 	kind: "pass";
-	csrfToken: string;
+	/** This request's token; absent when CSRF is off. */
+	csrfToken?: string;
 	/**
 	 * `true` only when CSRF was enforced+validated for this request (not
 	 * merely that a token was seeded). Consumers fail-close on this.
@@ -138,8 +139,6 @@ export interface CsrfPass {
 	/** Present only when a fresh cookie must be set (none was sent). */
 	setCookie?: CsrfOutcomeCookie;
 	cspNonce?: string;
-	/** Present when the rate limit was counted in this phase. */
-	rateLimitHeaders?: Record<string, string>;
 }
 
 export type GuardOutcome = RejectOutcome | PreflightOutcome | GuardPass;
@@ -347,32 +346,30 @@ export function runGuardPhase(
 }
 
 /**
- * The CSRF double-submit token and the CSP nonce — and the rate limit too when
- * `rateLimit` is set, for a host whose counting key needs what the earlier
- * middlewares set. No side effects.
+ * The CSRF double-submit token and the CSP nonce. No side effects.
  */
-export function runCsrfPhase(
-	bh: Blackhole,
-	req: CoreRequest,
-	rateLimit = false,
-): CsrfOutcome {
+export function runCsrfPhase(bh: Blackhole, req: CoreRequest): CsrfOutcome {
 	// Bound to a session the request does not have: an unbound token here
 	// would be valid for every session, so nothing is minted or verified.
 	if (bh.csrfSessionRequired() && !req.csrfBinding) {
 		throw new E_BLACKHOLE_SESSION_NOT_READY();
+	}
+	const cspNonce = bh.cspHasNonce() ? bh.generateNonce() : undefined;
+	// CSRF off: no token, no cookie — only what the phase owes otherwise.
+	if (!bh.csrfEnabled()) {
+		return { kind: "pass", csrfProtected: false, cspNonce };
 	}
 	const { name, options } = bh.csrfCookie();
 	const existing = usableCsrfToken(bh, req);
 	// A predicate `exceptRoutes`, or an entry naming the matched route's
 	// pattern, is decided here, before the engine: a function cannot cross the
 	// NAPI boundary, and the engine sees paths, not routes. It exempts from
-	// CSRF only — the rate limit still counts the request.
+	// CSRF only — the rate limit, counted in the guard phase, still counts
+	// the request.
 	const exempt = bh.csrfExempt(contextOf(req));
-	const checks: EngineCheck[] = exempt ? [] : ["csrf"];
-	if (rateLimit) checks.unshift("rateLimit");
 	let result: CheckResult | undefined;
-	if (checks.length > 0) {
-		const checked = engineCheck(bh, req, checks);
+	if (!exempt) {
+		const checked = engineCheck(bh, req, ["csrf"]);
 		if (checked.reject) return checked.reject;
 		result = checked.result;
 	}
@@ -389,10 +386,7 @@ export function runCsrfPhase(
 			existing || !bh.xsrfCookieEnabled()
 				? undefined
 				: { name, value: csrfToken, options },
-		cspNonce: bh.cspHasNonce() ? bh.generateNonce() : undefined,
-		rateLimitHeaders: result?.rateLimit
-			? rateLimitHeaders(result.rateLimit)
-			: undefined,
+		cspNonce,
 	};
 }
 

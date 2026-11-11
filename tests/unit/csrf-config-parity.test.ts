@@ -3,8 +3,11 @@
  * off, exempting routes by predicate, and `cookieOptions` as the config key.
  */
 import { describe, expect, it } from "vitest";
-import { runRequestPhase } from "../../src/core.js";
+import { runCsrfPhase, runRequestPhase } from "../../src/core.js";
 import { createBlackhole } from "../../src/index.js";
+import { blackholeMiddleware } from "../../src/middleware.js";
+import { viaAdapter } from "./support/adapters.js";
+import { FakeSession, reamContext, runRoute } from "./support/ream.js";
 
 const request = (path = "/posts", method = "POST") => ({
 	method,
@@ -248,4 +251,51 @@ describe("blackhole > the CSRF secret has to be a real one", () => {
 			createBlackhole({ csrf: false, secret: "change-me" }),
 		).not.toThrow();
 	});
+});
+
+describe("blackhole > `csrf: false` issues no token and no cookie", () => {
+	const bh = createBlackhole({ csrf: false });
+
+	it("mints nothing, request after request", () => {
+		const first = runCsrfPhase(bh, request("/", "GET"));
+		expect(first.kind).toBe("pass");
+		if (first.kind !== "pass") return;
+		expect(first.setCookie).toBeUndefined();
+		expect(first.csrfToken).toBeUndefined();
+		const second = runCsrfPhase(bh, {
+			...request("/", "GET"),
+			headers: { cookie: "XSRF-TOKEN=left-over-from-before" },
+		});
+		if (second.kind !== "pass") return;
+		expect(second.setCookie).toBeUndefined();
+		expect(bh.xsrfCookieEnabled()).toBe(false);
+	});
+
+	it("still hands out the CSP nonce", () => {
+		const withNonce = createBlackhole({
+			csrf: false,
+			csp: { directives: { scriptSrc: ["'self'", "@nonce"] } },
+		});
+		const outcome = runCsrfPhase(withNonce, request("/", "GET"));
+		if (outcome.kind !== "pass") throw new Error("refused");
+		expect(outcome.cspNonce).toBeTruthy();
+	});
+
+	it("sets no cookie and leaves the session alone under Ream", async () => {
+		const session = new FakeSession();
+		const built = reamContext({ bh, session });
+		const spy = await runRoute(blackholeMiddleware, built);
+		expect(spy.nextCalled).toBe(true);
+		expect(spy.cookies["XSRF-TOKEN"]).toBeUndefined();
+		expect(built.ctx.request.csrfToken).toBeUndefined();
+		expect(session.data.has("csrf-secret")).toBe(false);
+	});
+
+	for (const adapter of ["express", "fastify", "hono"] as const) {
+		it(`sets no cookie on ${adapter}`, async () => {
+			const res = await viaAdapter(adapter, { csrf: false }, { target: "/" });
+			expect(res.routeRan).toBe(true);
+			expect(res.headers["set-cookie"]).toBeUndefined();
+		});
+	}
 });

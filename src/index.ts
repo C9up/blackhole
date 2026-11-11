@@ -1062,7 +1062,12 @@ export interface Blackhole {
 	 * repeating the signature check here is safe.
 	 */
 	csrfTokenIsValid(token: string, binding?: string): boolean;
-	/** Whether the readable `XSRF-TOKEN` cookie should be seeded at all. */
+	/** Whether CSRF is on: off, no token is minted and no cookie is set. */
+	csrfEnabled(): boolean;
+	/**
+	 * Whether the readable `XSRF-TOKEN` cookie should be seeded at all — never
+	 * with CSRF off.
+	 */
 	xsrfCookieEnabled(): boolean;
 	/**
 	 * Whether CSRF is on and must be bound to a session (`csrf.session`): a
@@ -1396,8 +1401,11 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 					)
 				: undefined;
 		},
+		csrfEnabled() {
+			return csrf.enabled;
+		},
 		xsrfCookieEnabled() {
-			return csrf.enableXsrfCookie;
+			return csrf.enabled && csrf.enableXsrfCookie;
 		},
 		csrfSessionRequired() {
 			return csrf.enabled && csrf.session;

@@ -12,7 +12,6 @@
     "dist",
     "stubs",
     "index.*.node",
-    "scripts",
     "src"
   ],
   "exports": {

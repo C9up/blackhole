@@ -457,6 +457,21 @@ function assertHeaderKeys(
 }
 
 /** Whether a header is on: omitted means on, as does an object without `enabled`. */
+/**
+ * Refuse a configured header value the host could not write: empty, or
+ * holding anything outside visible ASCII, space and tab. A line break is a
+ * second header (or a split response on a host that does not check); the
+ * rest makes the host throw on every response instead of once, here.
+ */
+function assertHeaderValue(option: string, value: string): string {
+	if (value.length === 0 || /[^\t\x20-\x7e]/.test(value)) {
+		throw new Error(
+			`[blackhole] ${option}: ${JSON.stringify(value)} cannot be written as a header value (empty, or a control or non-ASCII character).`,
+		);
+	}
+	return value;
+}
+
 function isOn(value: { enabled?: boolean } | undefined): boolean {
 	return value?.enabled !== false;
 }
@@ -492,7 +507,9 @@ function computeSecurityHeaders(
 			throw new Error("[blackhole] xFrame.action ALLOW-FROM needs a `domain`.");
 		}
 		headers["x-frame-options"] =
-			action === "ALLOW-FROM" ? `ALLOW-FROM ${xFrame?.domain}` : action;
+			action === "ALLOW-FROM" && xFrame?.domain !== undefined
+				? `ALLOW-FROM ${assertHeaderValue("xFrame.domain", xFrame.domain)}`
+				: action;
 	}
 
 	if (isOn(hsts)) {
@@ -533,11 +550,18 @@ function computeSecurityHeaders(
 
 	if (isOn(referrerPolicy)) {
 		headers["referrer-policy"] =
-			referrerPolicy?.policy ?? "strict-origin-when-cross-origin";
+			referrerPolicy?.policy === undefined
+				? "strict-origin-when-cross-origin"
+				: assertHeaderValue("referrerPolicy.policy", referrerPolicy.policy);
 	}
 	if (isOn(permissionsPolicy)) {
 		headers["permissions-policy"] =
-			permissionsPolicy?.policy ?? "camera=(), microphone=(), geolocation=()";
+			permissionsPolicy?.policy === undefined
+				? "camera=(), microphone=(), geolocation=()"
+				: assertHeaderValue(
+						"permissionsPolicy.policy",
+						permissionsPolicy.policy,
+					);
 	}
 	return headers;
 }

@@ -275,3 +275,54 @@ describe("blackhole > protective headers, one key each", () => {
 		);
 	});
 });
+
+describe("blackhole > free-text header values are refused at boot", () => {
+	const INJECTED = "no-referrer\r\nX-Injected: 1";
+
+	it("refuses a line break in referrerPolicy.policy", () => {
+		expect(() =>
+			createBlackhole({ csrf: false, referrerPolicy: { policy: INJECTED } }),
+		).toThrow(/referrerPolicy\.policy/);
+	});
+
+	it("refuses a line break in permissionsPolicy.policy", () => {
+		expect(() =>
+			createBlackhole({
+				csrf: false,
+				permissionsPolicy: { policy: "camera=()\nX-Injected: 1" },
+			}),
+		).toThrow(/permissionsPolicy\.policy/);
+	});
+
+	it("refuses a line break in xFrame.domain", () => {
+		expect(() =>
+			createBlackhole({
+				csrf: false,
+				xFrame: {
+					action: "ALLOW-FROM",
+					domain: "https://a.example\r\nX-Injected: 1",
+				},
+			}),
+		).toThrow(/xFrame\.domain/);
+	});
+
+	it("refuses any other control character, a non-ASCII one, or an empty value", () => {
+		for (const policy of ["no-referrer\u0000", "no-referrer\u007f", "nö", ""]) {
+			expect(() =>
+				createBlackhole({ csrf: false, referrerPolicy: { policy } }),
+			).toThrow(/referrerPolicy\.policy/);
+		}
+	});
+
+	it("keeps a well-formed value", () => {
+		const headers = createBlackhole({
+			csrf: false,
+			referrerPolicy: { policy: "no-referrer, strict-origin" },
+			permissionsPolicy: { policy: "camera=(), geolocation=(self)" },
+			xFrame: { action: "ALLOW-FROM", domain: "https://a.example" },
+		}).securityHeaders();
+		expect(headers["referrer-policy"]).toBe("no-referrer, strict-origin");
+		expect(headers["permissions-policy"]).toBe("camera=(), geolocation=(self)");
+		expect(headers["x-frame-options"]).toBe("ALLOW-FROM https://a.example");
+	});
+});

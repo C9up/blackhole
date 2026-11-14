@@ -214,17 +214,39 @@ fn dots_to_brackets(key: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn many_distinct_keys_stay_linear() {
-        let query: String = (0..10_000)
+    fn distinct_keys(n: usize) -> String {
+        (0..n)
             .map(|i| format!("k{i}=1"))
             .collect::<Vec<_>>()
-            .join("&");
-        let started = std::time::Instant::now();
-        assert_eq!(first_duplicate_key(&query), None);
-        // Quadratic took ~50 ms in release; linear is well under a millisecond.
-        // The bound leaves room for a debug build on a slow CI runner.
-        assert!(started.elapsed() < std::time::Duration::from_millis(40));
+            .join("&")
+    }
+
+    /// The best of a few runs: the least disturbed by whatever else the
+    /// machine is doing.
+    fn fastest(query: &str) -> std::time::Duration {
+        (0..5)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                assert_eq!(first_duplicate_key(query), None);
+                started.elapsed()
+            })
+            .min()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn many_distinct_keys_stay_linear() {
+        // How the time GROWS, not a time: an absolute bound measured the
+        // machine — a debug build spends ~30 ms on 10 000 keys and failed a
+        // 40 ms bound one run in two. Eight times the keys costs about eight
+        // times as much when linear, sixty-four when quadratic.
+        let small = fastest(&distinct_keys(2_000));
+        let large = fastest(&distinct_keys(16_000));
+        assert!(
+            large < small * 24,
+            "8x the keys took {large:?} against {small:?}"
+        );
+        let query = distinct_keys(10_000);
         assert_eq!(
             first_duplicate_key(&format!("{query}&k9999=2")),
             Some("k9999".to_string())

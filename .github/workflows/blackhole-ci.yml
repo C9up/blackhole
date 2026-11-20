@@ -229,8 +229,9 @@ jobs:
   # RustSec advisories against Cargo.lock, on every push and before every
   # publish. A lockfile nothing re-audits goes red silently: seven of them
   # had, on the hashing, TLS and sanitising paths, before this job existed.
-  # Vulnerabilities and yanked crates fail it; unmaintained and unsound
-  # notices are printed.
+  # Every advisory fails it, unmaintained, unsound and yanked included
+  # (`--deny warnings`). Anything accepted is listed in .cargo/audit.toml,
+  # with its reason and the upstream release that lets it go.
   audit:
     name: Advisories (cargo audit)
     runs-on: ubuntu-latest
@@ -239,7 +240,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       # Pinned and --locked: the auditor is itself a dependency of the release.
       - run: cargo install cargo-audit --locked --version 0.22.2
-      - run: cargo audit --deny yanked
+      - run: cargo audit --deny warnings
 
   # Publish job — gated on workflow_dispatch (manual maintainer trigger).
   # Requires NPM_TOKEN secret + a v<MAJOR>.<MINOR>.<PATCH> tag at HEAD matching

@@ -99,6 +99,9 @@ function makeReamContext(opts: {
 			set(key: string, value: unknown) {
 				spy.store[key] = value;
 			},
+			get(key: string) {
+				return spy.store[key];
+			},
 		},
 		response,
 	};
@@ -140,32 +143,45 @@ describe("blackhole > blackholeMiddleware (Ream)", () => {
 		expect(final).toContain("<p>safe</p>");
 	});
 
-	it("does NOT sanitize a server-generated full HTML document (doctype guard)", async () => {
-		const fullDoc =
-			"<!doctype html>\n<html><head><title>x</title></head><body><div>hi</div></body></html>";
-		const { ctx } = makeReamContext({
-			bodyOut: fullDoc,
-			contentTypeOut: "text/html; charset=utf-8",
-		});
-		await blackholeMiddleware(ctx, () => {});
-		expect(ctx.response.getBody()).toBe(fullDoc);
-	});
-
-	it("does NOT sanitize a full document behind a comment or long white space", async () => {
-		const document =
-			'<!DOCTYPE html><html><head><title>T</title><script nonce="n">hydrate()</script></head><body><main><h1>Hi</h1></main></body></html>';
-		for (const prefix of [
-			"<!-- rendered by inker -->\n",
-			" ".repeat(20),
-			"\uFEFF\n\n\n<!-- a -->\n",
+	it("sanitizes a body that merely opens like a document (bug 039)", async () => {
+		// The first bytes are the content author's: an htmx partial answering a
+		// user's comment must not be able to switch the pass off with a prefix.
+		for (const body of [
+			"<!doctype html><img src=x onerror=alert(1)><script>alert(2)</script>",
+			"<!-- x --><html><script>alert(3)</script>",
+			`${" ".repeat(20)}<HTML><body><script>alert(4)</script></body></HTML>`,
 		]) {
 			const { ctx } = makeReamContext({
-				bodyOut: `${prefix}${document}`,
+				bodyOut: body,
 				contentTypeOut: "text/html; charset=utf-8",
 			});
 			await blackholeMiddleware(ctx, () => {});
-			expect(ctx.response.getBody()).toBe(`${prefix}${document}`);
+			expect(ctx.response.getBody()).not.toMatch(/<script|onerror/i);
 		}
+	});
+
+	it("leaves a page the application marked as its own (`trustedHtml`) intact", async () => {
+		const document =
+			'<!DOCTYPE html><html><head><title>T</title><script nonce="n">hydrate()</script></head><body><main><h1>Hi</h1></main></body></html>';
+		const { ctx } = makeReamContext({
+			bodyOut: document,
+			contentTypeOut: "text/html; charset=utf-8",
+		});
+		await blackholeMiddleware(ctx, () => {
+			ctx.store.set("trustedHtml", true);
+		});
+		expect(ctx.response.getBody()).toBe(document);
+	});
+
+	it("does not take a truthy non-boolean as the trusted flag", async () => {
+		const { ctx } = makeReamContext({
+			bodyOut: "<p>a</p><script>x</script>",
+			contentTypeOut: "text/html",
+		});
+		await blackholeMiddleware(ctx, () => {
+			ctx.store.set("trustedHtml", "true");
+		});
+		expect(ctx.response.getBody()).not.toMatch(/<script/i);
 	});
 
 	it("still sanitizes a fragment that opens with a comment", async () => {

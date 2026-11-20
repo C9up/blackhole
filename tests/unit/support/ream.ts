@@ -85,6 +85,7 @@ export function reamContext(options: ReamOptions): {
 		nextCalled: false,
 	};
 	const requestHeaders = options.headers ?? {};
+	const store = new Map<string, unknown>();
 	let body = options.responseBody ?? "";
 	if (options.responseType !== undefined) {
 		spy.headers["content-type"] = options.responseType;
@@ -153,7 +154,12 @@ export function reamContext(options: ReamOptions): {
 					? (requestHeaders.host ?? null)
 					: options.host,
 		},
-		store: { set() {} },
+		store: {
+			set(key: string, value: unknown) {
+				store.set(key, value);
+			},
+			get: (key: string) => store.get(key),
+		},
 		response,
 	};
 	return { ctx, spy };

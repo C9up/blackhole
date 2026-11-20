@@ -11,6 +11,7 @@ import {
 	type Blackhole,
 	type BlackholeContext,
 	type CheckResult,
+	type CspKeywordTarget,
 	type EngineCheck,
 	pathContext,
 } from "./index.js";
@@ -455,24 +456,41 @@ export function runRequestPhase(
 }
 
 /**
+ * The per-response flag an application sets on a body it vouches for — a page
+ * its own view layer rendered — so the `xss` pass leaves it alone. Read from
+ * `ctx.store` (Ream), `res.locals` (Express), the reply (Fastify) or the Hono
+ * context; only the literal `true` counts.
+ */
+export const TRUSTED_HTML_FLAG = "trustedHtml";
+
+/**
  * Response-phase security: protective headers (with the per-request CSP nonce
- * substituted) plus, with `xss` on, body sanitization. Only `text/html` bodies are sanitized;
- * a server-rendered full document (`<!doctype>` / `<html>`, after any leading
- * white space and comments) is left intact (ammonia is for fragments, not
- * whole documents). Non-HTML bodies (text/plain,
- * JSON, CSV, …) are served verbatim — the browser never parses them as markup
+ * substituted) plus, with `xss` on, body sanitization. Only `text/html` bodies
+ * are sanitized — all of them, whatever their first bytes look like, except a
+ * body the application marked as its own (`trusted`). Whether a body is "a
+ * full document" is never guessed from a `<!doctype>`/`<html>` prefix: that
+ * prefix is written by whoever wrote the content, so an untrusted fragment
+ * could claim it. Non-HTML bodies (text/plain, JSON, CSV, …) are served
+ * verbatim — the browser never parses them as markup
  * (`X-Content-Type-Options: nosniff`), so there is nothing to escape.
  */
 export function runResponsePhase(
 	bh: Blackhole,
-	input: { body: string; contentType: string; cspNonce?: string },
+	input: {
+		body: string;
+		contentType: string;
+		cspNonce?: string;
+		/** The framework's request/response, for the CSP keyword resolvers. */
+		target?: CspKeywordTarget;
+		/** The application marked this response's HTML as its own ({@link TRUSTED_HTML_FLAG}). */
+		trusted?: boolean;
+	},
 ): { headers: Record<string, string>; body: string } {
-	const headers = bh.securityHeaders(input.cspNonce);
-	// Only when the application asked (`xss`). The engine then decides what is
-	// sanitized: `text/html` only, and never a full document (one test, in one
-	// place, so the two cannot drift apart).
+	const headers = bh.securityHeaders(input.cspNonce, input.target);
+	// Only when the application asked (`xss`), and not on a body it vouched
+	// for. The engine then decides what is sanitized: `text/html` only.
 	const body =
-		input.body && bh.xssEnabled()
+		input.body && bh.xssEnabled() && input.trusted !== true
 			? bh.sanitizeResponse(input.body, input.contentType)
 			: input.body;
 	return { headers, body };

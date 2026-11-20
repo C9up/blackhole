@@ -29,6 +29,8 @@ export interface AdapterRequest {
 	routeHeaders?: Record<string, string>;
 	/** An HTML body the route sends as `text/html` (`ok` as text otherwise). */
 	routeBody?: string;
+	/** The route marks its HTML as the application's own (`trustedHtml`). */
+	trustHtml?: boolean;
 }
 
 export interface AdapterResult {
@@ -72,6 +74,7 @@ async function viaReam(
 		for (const [name, value] of Object.entries(req.routeHeaders ?? {})) {
 			built.ctx.response.header(name, value);
 		}
+		if (req.trustHtml) built.ctx.store.set("trustedHtml", true);
 		if (req.routeBody !== undefined) {
 			built.ctx.response.header("content-type", "text/html; charset=utf-8");
 			built.ctx.response.send(req.routeBody);
@@ -97,6 +100,7 @@ async function viaExpress(
 	let routeRan = false;
 	const res = {
 		headersSent: false,
+		locals: { trustedHtml: req.trustHtml === true },
 		getHeader: (name: string) => headers[name.toLowerCase()],
 		setHeader(name: string, value: string) {
 			headers[name.toLowerCase()] = value;
@@ -167,6 +171,7 @@ interface FastifyReplyLike {
 	header(name: string, value: string | string[]): FastifyReplyLike;
 	getHeader(name: string): string | string[] | undefined;
 	send(payload?: unknown): FastifyReplyLike;
+	trustedHtml?: boolean;
 }
 
 async function viaFastify(
@@ -218,6 +223,7 @@ async function viaFastify(
 		if (req.routeBody !== undefined) {
 			reply.header("content-type", "text/html; charset=utf-8");
 		}
+		if (req.trustHtml) reply.trustedHtml = true;
 	}
 	const answered = await hooks.get("onSend")?.(
 		request,
@@ -252,6 +258,7 @@ async function viaHono(
 		for (const [name, value] of Object.entries(req.routeHeaders ?? {})) {
 			c.header(name, value);
 		}
+		if (req.trustHtml) c.set("trustedHtml", true);
 		return req.routeBody === undefined ? c.text("ok") : c.html(req.routeBody);
 	});
 	const response = await app.request(

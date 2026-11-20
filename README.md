@@ -136,7 +136,10 @@ are validated when the filter is created: an unquoted keyword (`self`, `none`,
 or `,` inside a source, or a policy without `default-src` throws. A directive
 set to `null` is dropped; `default-src` only through
 `dangerouslyDisableDefaultSrc`. `@nonce` is replaced per request with
-`'nonce-…'`, available as `response.nonce`.
+`'nonce-…'`, available as `response.nonce`. Any other `@keyword` is resolved per
+request by the resolver registered with `cspKeywords.register('@assetsUrl',
+(request, response, nonce) => '…')`; one nothing resolves throws when the filter
+is created.
 
 ## CORS
 
@@ -171,8 +174,14 @@ event handlers go, and so do forms, inputs, buttons, SVG and media. Untrusted
 markup also loses `id`, `is`, `slot`, `part` and `data-*` — DOM clobbering,
 customized elements, framework bindings, shadow DOM.
 
-`xss: true` runs the same pass over every `text/html` fragment the application
-sends (full documents are left alone). It is off by default: the application's
+`xss: true` runs the same pass over every `text/html` body the application
+sends, one that opens like a document (`<!doctype html>`) included — that
+prefix is written by whoever wrote the content. A page the application renders
+itself is left alone only when the handler marks the response: `trustedHtml`
+set to `true` in `ctx.store` (Ream), `res.locals` (Express), on the reply
+(Fastify) or with `c.set` (Hono). A page rendered by `@c9up/aurora` (0.1.52 or
+later) or `@c9up/inker` (0.1.24 or later) is marked by the renderer. It is off
+by default: the application's
 own partials — an HTMX form, an `<svg>` icon, a `<video>` — would lose
 everything outside the allow-list. Turn it on only where every fragment may
 carry untrusted markup; the object form turns it on and opts attributes back
@@ -282,12 +291,20 @@ export default defineConfig({
     stores: {
       memory: limiterStores.memory(),
       redis: limiterStores.redis({ connection: 'main' }),
+      database: limiterStores.database({ tableName: 'rate_limits' }),
     },
   },
 })
 ```
 
 The Redis store's `clear()` deletes its own keys (by prefix), not the database.
+The database store counts in a SQL table (PostgreSQL, MySQL, SQLite) through
+atlas' `db` or any client with `dialect` and `rawQuery()`; atlas is loaded on
+first use, never required. Its migration is
+`stubs/database/migrations/9100_create_rate_limits.stub`.
+
+`limiter.multi([...])` counts several limits at once, each on its own key;
+`limiter.clear(['redis'])` clears the named stores only.
 
 ## Entry points
 

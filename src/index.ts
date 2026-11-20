@@ -19,6 +19,11 @@
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { clientKey } from "./clientKey.js";
+import {
+	type CspKeywordResolver,
+	cspKeywords,
+	resolveCspKeywords,
+} from "./cspKeywords.js";
 import { durationToSeconds } from "./duration.js";
 import { hasFunctions, loadNativeBinary } from "./vendor/nativeBinary.js";
 import { inProduction } from "./vendor/nodeEnv.js";
@@ -102,7 +107,10 @@ export interface ContentTypeSniffingConfig {
  *
  * Either way, the `@nonce` token is replaced per request with
  * `'nonce-<random>'`, and the raw nonce is exposed as `ctx.response.nonce` (and
- * `ctx.store` `cspNonce`) for `<script nonce="…">`.
+ * `ctx.store` `cspNonce`) for `<script nonce="…">`. Any other `@keyword` is
+ * resolved per request by the resolver registered for it with
+ * {@link cspKeywords}`.register()`; one without a resolver is refused when the
+ * policy is built.
  *
  * CSP keywords MUST be single-quoted (`'self'`, `'none'`, `'unsafe-inline'`,
  * `'strict-dynamic'`, `'nonce-…'`, `'sha256-…'`, …). An unquoted keyword is
@@ -368,9 +376,12 @@ function assertCspString(csp: string): void {
 		}
 		seen.add(lowered);
 		for (const source of sources) {
-			if (source !== "@nonce") assertCspSource(lowered, source);
+			// An `@keyword` is resolved per request; that it has a resolver is
+			// checked below, over the whole policy.
+			if (!source.startsWith("@")) assertCspSource(lowered, source);
 		}
 	}
+	cspKeywords.capture(csp);
 }
 
 /** Serialize a CSP directive map to a header string (`a 'self'; b; c x y`). */
@@ -952,14 +963,27 @@ export interface XssConfig {
 	allowAttributes?: XssOptInAttribute[];
 }
 
+/** The framework objects a CSP keyword resolver receives for this request. */
+export interface CspKeywordTarget {
+	request?: unknown;
+	response?: unknown;
+}
+
 export interface BlackholeOptions extends SecurityHeadersOptions {
 	/**
 	 * Sanitize every `text/html` fragment the application sends as untrusted
 	 * markup (default: false). On, a fragment keeps only the sanitizer's
 	 * allow-list: forms, inputs, buttons, SVG and media are removed, so turn
 	 * it on only where every fragment may carry untrusted markup. An object
-	 * turns it on and opts attributes back in. A full document is never
-	 * touched, and `sanitizeResponse()` cleans a given body whatever this says.
+	 * turns it on and opts attributes back in.
+	 *
+	 * Every `text/html` body is sanitized, one that opens like a document
+	 * (`<!doctype`, `<html`) included: those first bytes belong to whoever
+	 * wrote the content. A page the application renders itself is skipped
+	 * only when the application says so for that response — `trustedHtml`
+	 * set to `true` in `ctx.store` (Ream), `res.locals` (Express), on the
+	 * reply (Fastify) or with `c.set` (Hono). `sanitizeResponse()` cleans a
+	 * given body whatever this says.
 	 */
 	xss?: boolean | XssConfig;
 	/** CSRF validation — `true`/`false` to toggle, or an object for fine-grained control. */
@@ -1061,18 +1085,24 @@ export interface Blackhole {
 	 */
 	generateCsrfToken(binding?: string): string;
 	/**
-	 * Sanitize `body` as untrusted markup when `contentType` is `text/html`
-	 * (a full document excepted); any other type comes back unchanged. Always,
-	 * whatever `xss` says — what an application calls on input it stores.
+	 * Sanitize `body` as untrusted markup when `contentType` is `text/html`,
+	 * whatever its first bytes look like (`<!doctype html>` included); any
+	 * other type comes back unchanged. Always, whatever `xss` says — what an
+	 * application calls on input it stores.
 	 */
 	sanitizeResponse(body: string, contentType: string): string;
 	/** Whether the response phase sanitizes the application's `text/html` fragments (`xss`). */
 	xssEnabled(): boolean;
 	/**
 	 * Protective response headers (Helmet-style), computed from config. Pass a
-	 * `nonce` to substitute the `@nonce` CSP token with `'nonce-<nonce>'`.
+	 * `nonce` to substitute the `@nonce` CSP token with `'nonce-<nonce>'`, and
+	 * the framework's request/response for the other `@keyword` resolvers
+	 * ({@link cspKeywords}).
 	 */
-	securityHeaders(nonce?: string): Record<string, string>;
+	securityHeaders(
+		nonce?: string,
+		target?: CspKeywordTarget,
+	): Record<string, string>;
 	/** Does the configured CSP use the `@nonce` token (→ a per-request nonce is needed)? */
 	cspHasNonce(): boolean;
 	/** Generate a fresh CSP nonce (base64). */
@@ -1385,7 +1415,12 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		? "content-security-policy-report-only"
 		: "content-security-policy";
 	const baseCsp = baseHeaders[cspHeaderName];
-	const cspHasNonce = baseCsp?.includes("@nonce") ?? false;
+	// The resolvers of the keywords this policy names, as registered now.
+	const cspResolvers =
+		baseCsp === undefined
+			? new Map<string, CspKeywordResolver>()
+			: cspKeywords.capture(baseCsp);
+	const cspHasNonce = cspResolvers.has("@nonce");
 	const corsConfig = options.cors;
 	if (corsConfig) validateCors(corsConfig);
 
@@ -1414,16 +1449,17 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		xssEnabled() {
 			return xssEnabled;
 		},
-		securityHeaders(nonce?: string) {
-			if (!cspHasNonce || baseCsp === undefined) return baseHeaders;
-			// Substitute the `@nonce` token per request: `'nonce-<nonce>'` when a
-			// nonce is supplied, otherwise drop the token (and tidy whitespace).
-			const csp = nonce
-				? baseCsp.replaceAll("@nonce", `'nonce-${nonce}'`)
-				: baseCsp
-						.replaceAll("@nonce", "")
-						.replace(/\s{2,}/g, " ")
-						.trim();
+		securityHeaders(nonce?: string, target?: CspKeywordTarget) {
+			if (cspResolvers.size === 0 || baseCsp === undefined) return baseHeaders;
+			// Each `@keyword` resolved for this request — `@nonce` to
+			// `'nonce-<nonce>'`, or dropped when no nonce is supplied.
+			const csp = resolveCspKeywords(
+				baseCsp,
+				cspResolvers,
+				target?.request,
+				target?.response,
+				nonce,
+			);
 			return { ...baseHeaders, [cspHeaderName]: csp };
 		},
 		cspHasNonce() {
@@ -1503,12 +1539,26 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 }
 
 export { clientKey } from "./clientKey.js";
-export { E_BLACKHOLE_SESSION_NOT_READY } from "./errors.js";
 export {
+	type CspKeywordResolver,
+	CspKeywords,
+	cspKeywords,
+} from "./cspKeywords.js";
+export {
+	E_BLACKHOLE_DATABASE_UNAVAILABLE,
+	E_BLACKHOLE_INVALID_CSP_KEYWORD_VALUE,
+	E_BLACKHOLE_SESSION_NOT_READY,
+	E_BLACKHOLE_UNKNOWN_CSP_KEYWORD,
+	E_BLACKHOLE_UNSUPPORTED_DATABASE,
+} from "./errors.js";
+export {
+	DatabaseLimiterStore,
 	defineThrottle,
 	HttpLimiter,
 	Limiter,
 	type LimiterConfig,
+	type LimiterDatabase,
+	type LimiterDatabaseSource,
 	type LimiterHttpContext,
 	LimiterManager,
 	type LimiterOptions,
@@ -1520,6 +1570,8 @@ export {
 	type LimiterStoreFactory,
 	limiterStores,
 	MemoryLimiterStore,
+	MultiLimiter,
+	type MultiLimiterOptions,
 	RedisLimiterStore,
 	type ThrottleContext,
 	ThrottleException,

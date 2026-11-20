@@ -58,6 +58,8 @@ interface FastifyReply {
 	send(payload?: unknown): FastifyReply;
 	/** CSP nonce for this request (Adonis idiom). Seeded by the adapter. */
 	nonce?: string;
+	/** `reply.trustedHtml = true`: this body is the application's own page, the `xss` pass leaves it alone. */
+	trustedHtml?: boolean;
 }
 
 /** Structural subset of the Fastify instance the plugin registers hooks on. */
@@ -195,12 +197,14 @@ export function blackholeFastify(options: BlackholeOptions = {}) {
 			if (outcome.cspNonce) reply.nonce = outcome.cspNonce;
 		});
 
-		fastify.addHook("onSend", async (_request, reply, payload) => {
+		fastify.addHook("onSend", async (request, reply, payload) => {
 			const ct = reply.getHeader("content-type");
 			const { headers, body } = runResponsePhase(bh, {
 				body: typeof payload === "string" ? payload : "",
 				contentType: typeof ct === "string" ? ct : "",
 				cspNonce: reply.nonce,
+				target: { request, response: reply },
+				trusted: reply.trustedHtml === true,
 			});
 			// Only where the route did not set its own: a page that must be
 			// framed by a partner, or carries a CSP of its own, keeps it.

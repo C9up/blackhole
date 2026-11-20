@@ -189,3 +189,62 @@ describe("blackhole > the app's own HTML is not sanitized unless asked", () => {
 		expect(out).toContain("<p>hi</p>");
 	});
 });
+
+describe("blackhole > a body cannot opt itself out of the xss pass (bug 039)", () => {
+	/** Untrusted bodies that open like a document. */
+	const DISGUISED = [
+		"<!doctype html><img src=x onerror=alert(1)><script>alert(2)</script>",
+		"<!-- x --><html><script>alert(3)</script>",
+		'﻿<?xml version="1.0"?>\n<!DOCTYPE html><script>alert(4)</script>',
+	];
+	const PAGE =
+		'<!DOCTYPE html><html><head><title>T</title><script nonce="n">hydrate()</script></head><body><form method="post"><button>Go</button></form></body></html>';
+
+	it("`sanitizeResponse()` cleans a body that starts like a document", () => {
+		const bh = createBlackhole({ csrf: false, xss: true });
+		for (const body of DISGUISED) {
+			const out = bh.sanitizeResponse(body, "text/html");
+			expect(out).not.toMatch(/<script|onerror/i);
+		}
+	});
+
+	it("the response pass cleans it through every adapter", async () => {
+		for (const adapter of ADAPTERS) {
+			for (const body of DISGUISED) {
+				const res = await viaAdapter(
+					adapter,
+					{ csrf: false, xss: true },
+					{ target: "/", routeBody: body },
+				);
+				expect(res.sentBody, `${adapter}: ${body}`).not.toMatch(
+					/<script|onerror/i,
+				);
+			}
+		}
+	});
+
+	it("a page the application marks `trustedHtml` goes out as written", async () => {
+		for (const adapter of ADAPTERS) {
+			const res = await viaAdapter(
+				adapter,
+				{ csrf: false, xss: true },
+				{ target: "/", routeBody: PAGE, trustHtml: true },
+			);
+			expect(res.sentBody, adapter).toBe(PAGE);
+		}
+	});
+
+	it("`runResponsePhase` skips only on `trusted: true`", () => {
+		const bh = createBlackhole({ csrf: false, xss: true });
+		expect(
+			runResponsePhase(bh, {
+				body: PAGE,
+				contentType: "text/html",
+				trusted: true,
+			}).body,
+		).toBe(PAGE);
+		expect(
+			runResponsePhase(bh, { body: PAGE, contentType: "text/html" }).body,
+		).not.toContain("<script");
+	});
+});

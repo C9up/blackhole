@@ -37,6 +37,11 @@ declare module "hono" {
 		csrfToken?: string;
 		/** This request's CSP nonce, when the CSP uses `@nonce`. */
 		cspNonce?: string;
+		/**
+		 * `c.set('trustedHtml', true)`: this response's HTML is the
+		 * application's own page, and the `xss` pass leaves it alone.
+		 */
+		trustedHtml?: boolean;
 	}
 }
 
@@ -128,7 +133,7 @@ export function blackholeHono(
 			if (counted.kind === "reject") {
 				return refusal(counted.status, counted.body, {
 					...counted.headers,
-					...bh.securityHeaders(),
+					...bh.securityHeaders(undefined, { request: c.req, response: c }),
 				});
 			}
 			storeHeaders = counted.headers;
@@ -154,7 +159,7 @@ export function blackholeHono(
 		if (outcome.kind === "reject") {
 			return refusal(outcome.status, outcome.body, {
 				...(outcome.headers ?? {}),
-				...bh.securityHeaders(),
+				...bh.securityHeaders(undefined, { request: c.req, response: c }),
 			});
 		}
 		if (outcome.kind === "preflight") {
@@ -162,7 +167,7 @@ export function blackholeHono(
 				status: outcome.status,
 				headers: {
 					...outcome.headers,
-					...bh.securityHeaders(),
+					...bh.securityHeaders(undefined, { request: c.req, response: c }),
 					...(outcome.varyOrigin ? { vary: "Origin" } : {}),
 				},
 			});
@@ -181,6 +186,8 @@ export function blackholeHono(
 			body: html ? await c.res.clone().text() : "",
 			contentType,
 			cspNonce: outcome.cspNonce,
+			target: { request: c.req, response: c },
+			trusted: c.get("trustedHtml") === true,
 		});
 		// A fresh Response: the route's own may have immutable headers (one
 		// returned straight from `fetch`, for instance).

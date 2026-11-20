@@ -53,7 +53,8 @@ export declare class Blackhole {
 	};
 	/**
 	 * Sanitize a body as untrusted markup when `content_type` is `text/html`
-	 * (a full document excepted); any other type comes back unchanged.
+	 * (whatever its first bytes look like); any other type comes back
+	 * unchanged.
 	 *
 	 * Always, whatever the `xss` option says: that option decides whether
 	 * the host runs this on its own responses, while a direct call is how an

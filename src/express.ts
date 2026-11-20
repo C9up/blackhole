@@ -19,6 +19,7 @@ import {
 	runResponsePhase,
 	runStoreRateLimit,
 	serializeCookie,
+	TRUSTED_HTML_FLAG,
 } from "./core.js";
 import {
 	type Blackhole,
@@ -57,6 +58,11 @@ interface ExpressResponse {
 	send(body?: unknown): unknown;
 	/** CSP nonce for this request (Adonis idiom). Seeded by the adapter. */
 	nonce?: string;
+	/**
+	 * Express's per-response bag. `res.locals.trustedHtml = true` tells the
+	 * `xss` pass this body is the application's own page.
+	 */
+	locals?: Record<string, unknown>;
 }
 
 type ExpressNext = (err?: unknown) => void;
@@ -105,11 +111,13 @@ function appendVary(res: ExpressResponse, value: string): void {
 
 /** The protective headers (CSP, HSTS, nosniff…), on refusals as on pages. */
 function setSecurityHeaders(
+	req: ExpressRequest,
 	res: ExpressResponse,
 	bh: Blackhole,
 	nonce?: string,
 ): void {
-	for (const [name, value] of Object.entries(bh.securityHeaders(nonce))) {
+	const headers = bh.securityHeaders(nonce, { request: req, response: res });
+	for (const [name, value] of Object.entries(headers)) {
 		res.setHeader(name, value);
 	}
 }
@@ -141,7 +149,7 @@ export function blackholeExpress(options: BlackholeOptions = {}) {
 				for (const [name, value] of Object.entries(counted.headers ?? {})) {
 					res.setHeader(name, value);
 				}
-				setSecurityHeaders(res, bh);
+				setSecurityHeaders(req, res, bh);
 				res.status(counted.status).json(counted.body);
 				return;
 			}
@@ -168,7 +176,7 @@ export function blackholeExpress(options: BlackholeOptions = {}) {
 			for (const [name, value] of Object.entries(outcome.headers ?? {})) {
 				res.setHeader(name, value);
 			}
-			setSecurityHeaders(res, bh);
+			setSecurityHeaders(req, res, bh);
 			res.status(outcome.status).json(outcome.body);
 			return;
 		}
@@ -177,7 +185,7 @@ export function blackholeExpress(options: BlackholeOptions = {}) {
 			for (const [name, value] of Object.entries(outcome.headers)) {
 				res.setHeader(name, value);
 			}
-			setSecurityHeaders(res, bh);
+			setSecurityHeaders(req, res, bh);
 			res.status(204).send("");
 			return;
 		}
@@ -209,7 +217,7 @@ export function blackholeExpress(options: BlackholeOptions = {}) {
 		if (outcome.cspNonce) res.nonce = outcome.cspNonce;
 		// Now, not only in the send wrapper below: a raw `res.end(...)`, a stream
 		// or Express's own error handler never goes through `send`.
-		setSecurityHeaders(res, bh, outcome.cspNonce);
+		setSecurityHeaders(req, res, bh, outcome.cspNonce);
 
 		// Response phase: wrap `send` to apply protective headers + sanitize the
 		// body as the handler responds (covers `res.send` and `res.json`, which
@@ -227,6 +235,8 @@ export function blackholeExpress(options: BlackholeOptions = {}) {
 					body: typeof body === "string" ? body : "",
 					contentType: ct,
 					cspNonce: outcome.cspNonce,
+					target: { request: req, response: res },
+					trusted: res.locals?.[TRUSTED_HTML_FLAG] === true,
 				});
 				// Set before the handler ran; added again only where missing, so
 				// a route's own CSP or X-Frame-Options stands.

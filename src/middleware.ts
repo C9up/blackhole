@@ -29,6 +29,7 @@ import {
 	runGuardPhase,
 	runResponsePhase,
 	runStoreRateLimit,
+	TRUSTED_HTML_FLAG,
 } from "./core.js";
 import {
 	type Blackhole,
@@ -94,8 +95,12 @@ export interface ReamContext {
 		 */
 		csrfProtected?: boolean;
 	};
-	/** Per-request store — the CSRF token is published here for templating (inker `csrfField()`). */
-	store: { set(key: string, value: unknown): void };
+	/**
+	 * Per-request store — the CSRF token is published here for templating
+	 * (inker `csrfField()`), and `trustedHtml: true` read back: the response's
+	 * HTML is the application's own page, which the `xss` pass leaves alone.
+	 */
+	store: { set(key: string, value: unknown): void; get?(key: string): unknown };
 	response: {
 		/** CSP nonce for this request (Adonis idiom: `response.nonce`). Seeded by the middleware when CSP uses `@nonce`. */
 		nonce?: string;
@@ -151,7 +156,10 @@ function applySecurityHeaders(
 	bh: Blackhole,
 	nonce?: string,
 ): void {
-	const headers = bh.securityHeaders(nonce);
+	const headers = bh.securityHeaders(nonce, {
+		request: ctx.request,
+		response: ctx.response,
+	});
 	for (const [name, value] of Object.entries(headers)) {
 		ctx.response.header(name, value);
 	}
@@ -456,6 +464,8 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 		body: ctx.response.getBody(),
 		contentType: ctx.response.getHeader("content-type") ?? "",
 		cspNonce: outcome.cspNonce,
+		target: { request: ctx.request, response: ctx.response },
+		trusted: ctx.store.get?.(TRUSTED_HTML_FLAG) === true,
 	});
 	// Set before the handler ran; added again only where the response lost
 	// one. A route that set its own (a page framed by a partner, a CSP of its

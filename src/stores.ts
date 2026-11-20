@@ -27,6 +27,7 @@
 
 import type { RateLimitStore } from "./index.js";
 import { quasarConnection } from "./quasar.js";
+import { hasEnded } from "./vendor/quasarConnection.js";
 
 /** A store, built on first use. */
 export type RateLimitStoreFactory = () => RateLimitStore;
@@ -116,7 +117,18 @@ export class RedisRateLimitStore implements RateLimitStore {
 		this.#prefix = options.prefix ?? "blackhole:rate";
 	}
 
+	/**
+	 * The client, resolved on first use and again once it has ended for good:
+	 * quasar retires a connection whose retry strategy gave up and hands out a
+	 * fresh one, and keeping the dead client failed every request with
+	 * "Connection is closed." until restart. NAMED DEVIATION, better than
+	 * upstream, whose limiter captures `ioConnection` once. A client handed in
+	 * directly is kept whatever its state.
+	 */
 	async #client(): Promise<RateLimitRedisClient> {
+		if (typeof this.#source === "function" && hasEnded(this.#resolved)) {
+			this.#resolved = undefined;
+		}
 		if (this.#resolved) return this.#resolved;
 		this.#resolved =
 			typeof this.#source === "function" ? await this.#source() : this.#source;

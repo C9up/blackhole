@@ -26,10 +26,16 @@
  * that long instead.
  */
 
+import { createHash } from "node:crypto";
 import { clientKey } from "./clientKey.js";
 import { durationToSeconds } from "./duration.js";
 import {
+	E_BLACKHOLE_DATABASE_UNAVAILABLE,
+	E_BLACKHOLE_UNSUPPORTED_DATABASE,
+} from "./errors.js";
+import {
 	hasCommands,
+	hasEnded,
 	quasarConnection as loadQuasarConnection,
 } from "./vendor/quasarConnection.js";
 
@@ -356,7 +362,18 @@ export class RedisLimiterStore implements LimiterStore {
 		this.#prefix = options.prefix ?? "blackhole:limiter";
 	}
 
+	/**
+	 * The client, resolved on first use and again once it has ended for good:
+	 * quasar retires a connection whose retry strategy gave up and hands out a
+	 * fresh one, and keeping the dead client failed every request with
+	 * "Connection is closed." until restart. NAMED DEVIATION, better than
+	 * upstream, whose limiter captures `ioConnection` once. A client handed in
+	 * directly is kept whatever its state.
+	 */
 	async #client(): Promise<LimiterRedisClient> {
+		if (typeof this.#source === "function" && hasEnded(this.#resolved)) {
+			this.#resolved = undefined;
+		}
 		this.#resolved ??=
 			typeof this.#source === "function" ? await this.#source() : this.#source;
 		return this.#resolved;
@@ -427,6 +444,313 @@ export class RedisLimiterStore implements LimiterStore {
 	}
 }
 
+// ── The database store ───────────────────────────────────────────────────
+
+/** A row as the database hands it back. */
+type LimiterRow = Record<string, unknown>;
+
+/**
+ * The slice of a database client the database store issues. atlas' `db`
+ * service (`import db from '@c9up/atlas/services/db'`) has this shape, and so
+ * can anything else: the store never imports a data layer.
+ *
+ * Raw SQL rather than a query builder, deliberately: a count has to be ONE
+ * atomic upsert-and-increment, a dialect statement (`ON CONFLICT … DO UPDATE
+ * … RETURNING`, `ON DUPLICATE KEY UPDATE`) that no portable builder call
+ * expresses. `?` placeholders, bound positionally.
+ */
+export interface LimiterDatabase {
+	/** `postgres`, `mysql` or `sqlite` (atlas' names; `pg`, `mysql2`, `sqlite3` and `better-sqlite3` too). */
+	readonly dialect: string;
+	rawQuery(
+		sql: string,
+		bindings: unknown[],
+	): PromiseLike<readonly LimiterRow[]>;
+}
+
+export type LimiterDatabaseSource =
+	| LimiterDatabase
+	| (() => LimiterDatabase | Promise<LimiterDatabase>);
+
+type SqlDialect = "postgres" | "mysql" | "sqlite";
+
+const DIALECTS = new Map<string, SqlDialect>([
+	["postgres", "postgres"],
+	["postgresql", "postgres"],
+	["pg", "postgres"],
+	["mysql", "mysql"],
+	["mysql2", "mysql"],
+	["sqlite", "sqlite"],
+	["sqlite3", "sqlite"],
+	["better-sqlite3", "sqlite"],
+]);
+
+function isLimiterDatabase(value: unknown): value is LimiterDatabase {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		typeof Reflect.get(value, "rawQuery") === "function" &&
+		typeof Reflect.get(value, "dialect") === "string"
+	);
+}
+
+/**
+ * atlas' `db`, scoped to the named connection or left on the default one,
+ * loaded only when a database store first counts. The specifier is built at
+ * runtime: atlas is not a dependency of this package, and an application on
+ * another data layer never loads it.
+ */
+async function atlasDatabase(
+	name: string | undefined,
+): Promise<LimiterDatabase> {
+	const specifier = "@c9up/atlas/services/db";
+	const which =
+		name === undefined ? "default connection" : `connection "${name}"`;
+	let loaded: unknown;
+	try {
+		loaded = await import(/* @vite-ignore */ specifier);
+	} catch (cause) {
+		throw new E_BLACKHOLE_DATABASE_UNAVAILABLE(
+			`the database limiter store asks for atlas' ${which}, but @c9up/atlas is not installed. Install it, or pass a client: \`limiterStores.database({ connection: db })\``,
+			cause,
+		);
+	}
+	let scoped: unknown;
+	try {
+		const db: unknown = Reflect.get(Object(loaded), "default");
+		const connection: unknown = Reflect.get(Object(db), "connection");
+		scoped =
+			name === undefined || typeof connection !== "function"
+				? db
+				: Reflect.apply(connection, db, [name]);
+		// Reading `dialect` is what tells a booted atlas from one that is not.
+		if (isLimiterDatabase(scoped)) return scoped;
+	} catch (cause) {
+		throw new E_BLACKHOLE_DATABASE_UNAVAILABLE(
+			`atlas' ${which} is not available to the database limiter store: its provider has not booted, or the connection is not configured`,
+			cause,
+		);
+	}
+	throw new E_BLACKHOLE_DATABASE_UNAVAILABLE(
+		`@c9up/atlas/services/db did not expose a client with \`dialect\` and \`rawQuery()\` for the ${which}`,
+	);
+}
+
+/** A whole number out of a column, however the driver typed it. */
+function toInteger(value: unknown): number {
+	if (typeof value === "number") return value;
+	if (typeof value === "bigint" || typeof value === "string") {
+		return Number(value);
+	}
+	return Number.NaN;
+}
+
+/** A table name: an identifier, optionally schema-qualified. */
+const TABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/;
+
+function assertTableName(table: string | undefined): void {
+	if (table !== undefined && !TABLE_NAME.test(table)) {
+		throw new Error(
+			`[blackhole] the database limiter store's tableName ${JSON.stringify(table)} is not a table name.`,
+		);
+	}
+}
+
+/** The longest key stored as written; a longer one is stored as its digest. */
+const MAX_KEY_LENGTH = 255;
+
+/**
+ * Counts in a SQL table (PostgreSQL, MySQL, SQLite), shared by every process
+ * that reaches the database — for an application without Redis.
+ *
+ * The table has three columns: `key` (primary), `points`, `expire` (epoch
+ * milliseconds); the migration ships as
+ * `stubs/database/migrations/9100_create_rate_limits.stub`. Each count is ONE
+ * upsert-and-increment statement, so two replicas counting the same key at the
+ * same moment both land. MySQL has no `RETURNING`: the count is read back
+ * right after, and may already hold a concurrent request — it can only
+ * over-count.
+ *
+ * Better than upstream, deliberately: expired rows are deleted as counting
+ * goes (at most once a minute), so keys an attacker picks cannot grow the
+ * table without bound; and a key longer than the column (255) is stored as
+ * its SHA-256 instead of failing the insert. `clear()` empties the table, as
+ * upstream's truncate does: give the limiter a table of its own.
+ */
+export class DatabaseLimiterStore implements LimiterStore {
+	readonly name = "database";
+	readonly #source: LimiterDatabaseSource;
+	readonly #table: string;
+	#resolved: { db: LimiterDatabase; dialect: SqlDialect } | undefined;
+	#lastSweep = Date.now();
+	static readonly #SWEEP_INTERVAL_MS = 60_000;
+
+	constructor(
+		source: LimiterDatabaseSource,
+		options: { tableName?: string } = {},
+	) {
+		assertTableName(options.tableName);
+		this.#source = source;
+		this.#table = options.tableName ?? "rate_limits";
+	}
+
+	async #db(): Promise<{ db: LimiterDatabase; dialect: SqlDialect }> {
+		if (this.#resolved) return this.#resolved;
+		const db =
+			typeof this.#source === "function" ? await this.#source() : this.#source;
+		const dialect = DIALECTS.get(db.dialect.toLowerCase());
+		if (dialect === undefined) {
+			throw new E_BLACKHOLE_UNSUPPORTED_DATABASE(db.dialect);
+		}
+		this.#resolved = { db, dialect };
+		return this.#resolved;
+	}
+
+	/** The identifiers, quoted for the dialect (`key` is reserved on MySQL). */
+	#names(dialect: SqlDialect): {
+		table: string;
+		key: string;
+		points: string;
+		expire: string;
+	} {
+		const quote = (name: string) =>
+			dialect === "mysql" ? `\`${name}\`` : `"${name}"`;
+		return {
+			table: this.#table.split(".").map(quote).join("."),
+			key: quote("key"),
+			points: quote("points"),
+			expire: quote("expire"),
+		};
+	}
+
+	#key(key: string): string {
+		return key.length <= MAX_KEY_LENGTH
+			? key
+			: `sha256:${createHash("sha256").update(key).digest("hex")}`;
+	}
+
+	#record(row: LimiterRow | undefined, now: number): LimiterRecord | null {
+		if (row === undefined) return null;
+		const consumed = toInteger(row.points);
+		const expire = toInteger(row.expire);
+		if (!Number.isFinite(consumed) || !Number.isFinite(expire)) return null;
+		if (expire <= now) return null;
+		return { consumed: Math.max(0, consumed), msBeforeNext: expire - now };
+	}
+
+	/** Delete the expired rows, at most once per sweep interval. */
+	async #sweep(
+		db: LimiterDatabase,
+		dialect: SqlDialect,
+		now: number,
+	): Promise<void> {
+		if (now - this.#lastSweep < DatabaseLimiterStore.#SWEEP_INTERVAL_MS) {
+			return;
+		}
+		this.#lastSweep = now;
+		const n = this.#names(dialect);
+		await db.rawQuery(`DELETE FROM ${n.table} WHERE ${n.expire} <= ?`, [now]);
+	}
+
+	async increment(
+		key: string,
+		amount: number,
+		durationSeconds: number,
+	): Promise<LimiterRecord> {
+		const { db, dialect } = await this.#db();
+		const now = Date.now();
+		await this.#sweep(db, dialect, now);
+		const n = this.#names(dialect);
+		const id = this.#key(key);
+		const fresh = Math.max(0, amount);
+		const expire = now + durationSeconds * 1000;
+		// A live row gains `amount` (never below zero); an expired one starts a
+		// new window, as a missing one does.
+		const bindings = [id, fresh, expire, now, fresh, amount, now, expire];
+		let rows: readonly LimiterRow[];
+		if (dialect === "mysql") {
+			// Assignments run left to right: `expire` is still the old value
+			// when the `points` one reads it.
+			await db.rawQuery(
+				`INSERT INTO ${n.table} (${n.key}, ${n.points}, ${n.expire}) VALUES (?, ?, ?) ` +
+					"ON DUPLICATE KEY UPDATE " +
+					`${n.points} = IF(${n.expire} <= ?, ?, GREATEST(0, ${n.points} + ?)), ` +
+					`${n.expire} = IF(${n.expire} <= ?, ?, ${n.expire})`,
+				bindings,
+			);
+			rows = await db.rawQuery(
+				`SELECT ${n.points} AS points, ${n.expire} AS expire FROM ${n.table} WHERE ${n.key} = ?`,
+				[id],
+			);
+		} else {
+			const greatest = dialect === "postgres" ? "GREATEST" : "MAX";
+			rows = await db.rawQuery(
+				`INSERT INTO ${n.table} AS cur (${n.key}, ${n.points}, ${n.expire}) VALUES (?, ?, ?) ` +
+					`ON CONFLICT (${n.key}) DO UPDATE SET ` +
+					`${n.points} = CASE WHEN cur.${n.expire} <= ? THEN ? ELSE ${greatest}(0, cur.${n.points} + ?) END, ` +
+					`${n.expire} = CASE WHEN cur.${n.expire} <= ? THEN ? ELSE cur.${n.expire} END ` +
+					`RETURNING ${n.points} AS points, ${n.expire} AS expire`,
+				bindings,
+			);
+		}
+		// Just written: only a clock jump between the two reads makes it expired.
+		return (
+			this.#record(rows[0], now) ?? {
+				consumed: fresh,
+				msBeforeNext: durationSeconds * 1000,
+			}
+		);
+	}
+
+	async set(
+		key: string,
+		consumed: number,
+		durationSeconds: number,
+	): Promise<LimiterRecord> {
+		const { db, dialect } = await this.#db();
+		const n = this.#names(dialect);
+		const ms = durationSeconds * 1000;
+		const expire = Date.now() + ms;
+		const conflict =
+			dialect === "mysql"
+				? "ON DUPLICATE KEY UPDATE"
+				: `ON CONFLICT (${n.key}) DO UPDATE SET`;
+		await db.rawQuery(
+			`INSERT INTO ${n.table} (${n.key}, ${n.points}, ${n.expire}) VALUES (?, ?, ?) ` +
+				`${conflict} ${n.points} = ?, ${n.expire} = ?`,
+			[this.#key(key), consumed, expire, consumed, expire],
+		);
+		return { consumed, msBeforeNext: ms };
+	}
+
+	async get(key: string): Promise<LimiterRecord | null> {
+		const { db, dialect } = await this.#db();
+		const n = this.#names(dialect);
+		const rows = await db.rawQuery(
+			`SELECT ${n.points} AS points, ${n.expire} AS expire FROM ${n.table} WHERE ${n.key} = ?`,
+			[this.#key(key)],
+		);
+		return this.#record(rows[0], Date.now());
+	}
+
+	async delete(key: string): Promise<boolean> {
+		const { db, dialect } = await this.#db();
+		const n = this.#names(dialect);
+		const id = this.#key(key);
+		const rows = await db.rawQuery(
+			`SELECT ${n.key} AS id FROM ${n.table} WHERE ${n.key} = ?`,
+			[id],
+		);
+		await db.rawQuery(`DELETE FROM ${n.table} WHERE ${n.key} = ?`, [id]);
+		return rows.length > 0;
+	}
+
+	async clear(): Promise<void> {
+		const { db, dialect } = await this.#db();
+		await db.rawQuery(`DELETE FROM ${this.#names(dialect).table}`, []);
+	}
+}
+
 /** Store factories for {@link LimiterConfig.stores}. */
 export const limiterStores = {
 	/** In this process's memory. Single process. */
@@ -457,6 +781,35 @@ export const limiterStores = {
 						})
 				: connection;
 		return () => new RedisLimiterStore(source, { prefix: options.prefix });
+	},
+
+	/**
+	 * In a SQL table (PostgreSQL, MySQL, SQLite), shared by every process.
+	 * `connection` takes a client of the {@link LimiterDatabase} shape (atlas'
+	 * `db`), a function answering one, or the NAME of an atlas connection;
+	 * left out, atlas' default connection — loaded on first use, so atlas is
+	 * needed only by an application that counts this way. `tableName`
+	 * defaults to `rate_limits`.
+	 *
+	 * Upstream names the connection `connectionName`; here it is `connection`,
+	 * as for {@link limiterStores.redis}, because it also takes the client
+	 * itself — the way this package stays free of any data layer.
+	 */
+	database(
+		options: {
+			connection?: LimiterDatabaseSource | string;
+			tableName?: string;
+		} = {},
+	): LimiterStoreFactory {
+		const { connection, tableName } = options;
+		const source: LimiterDatabaseSource =
+			connection === undefined || typeof connection === "string"
+				? () => atlasDatabase(connection)
+				: connection;
+		// The table name is checked here, when the config is read, rather than
+		// on the first request that counts.
+		assertTableName(tableName);
+		return () => new DatabaseLimiterStore(source, { tableName });
 	},
 };
 
@@ -667,6 +1020,132 @@ export class Limiter {
 	}
 }
 
+/** One budget of a {@link MultiLimiter}: the limit, and the key it counts. */
+export interface MultiLimiterOptions extends LimiterOptions {
+	key: string | number;
+}
+
+/**
+ * Several limits counted together — "5 a minute AND 100 a day" on one login,
+ * or one budget per user plus one per IP — each limiter on its own key.
+ */
+export class MultiLimiter {
+	readonly #limiters: { key: string; limiter: Limiter }[];
+
+	constructor(limiters: { key: string | number; limiter: Limiter }[]) {
+		this.#limiters = limiters.map(({ key, limiter }) => ({
+			key: String(key),
+			limiter,
+		}));
+	}
+
+	/** The limiters, each with its key. */
+	list(): readonly { key: string; limiter: Limiter }[] {
+		return this.#limiters;
+	}
+
+	/**
+	 * Count one request on every limiter, in order. Throws the first
+	 * {@link ThrottleException}; the limiters before it have counted.
+	 */
+	async consume(): Promise<LimiterResponse[]> {
+		const responses: LimiterResponse[] = [];
+		for (const { key, limiter } of this.#limiters) {
+			responses.push(await limiter.consume(key));
+		}
+		return responses;
+	}
+
+	/** Count one request on every limiter, without throwing. */
+	increment(): Promise<LimiterResponse[]> {
+		return Promise.all(
+			this.#limiters.map(({ key, limiter }) => limiter.increment(key)),
+		);
+	}
+
+	/** Give one request back on every limiter, never below zero. */
+	decrement(): Promise<LimiterResponse[]> {
+		return Promise.all(
+			this.#limiters.map(({ key, limiter }) => limiter.decrement(key)),
+		);
+	}
+
+	/** Where each key stands (`null` for one with nothing counted). */
+	get(): Promise<(LimiterResponse | null)[]> {
+		return Promise.all(
+			this.#limiters.map(({ key, limiter }) => limiter.get(key)),
+		);
+	}
+
+	/** Set every key's count to `requests`, for `duration` (default: each window). */
+	set(
+		requests: number,
+		duration?: number | string,
+	): Promise<LimiterResponse[]> {
+		return Promise.all(
+			this.#limiters.map(({ key, limiter }) =>
+				limiter.set(key, requests, duration),
+			),
+		);
+	}
+
+	/** Forget every key. */
+	delete(): Promise<boolean[]> {
+		return Promise.all(
+			this.#limiters.map(({ key, limiter }) => limiter.delete(key)),
+		);
+	}
+
+	/**
+	 * Run `callback` if every limiter has budget left, counting it on all of
+	 * them. `undefined`, without running it, when one is over.
+	 */
+	async attempt<T>(callback: () => T | Promise<T>): Promise<T | undefined> {
+		try {
+			await this.consume();
+		} catch (error) {
+			if (error instanceof ThrottleException) return undefined;
+			throw error;
+		}
+		return callback();
+	}
+
+	/**
+	 * Run `callback`, counting only its FAILURES, on every limiter: a key
+	 * that runs out is blocked for its limiter's `blockDuration`. `[error,
+	 * null]` without running it when one key has no attempt left; on success
+	 * every key is cleared and the result is `[null, result]`.
+	 */
+	async penalize<T>(
+		callback: () => T | Promise<T>,
+	): Promise<[ThrottleException, null] | [null, T]> {
+		const responses = await this.get();
+		const exhausted = responses.find(
+			(response) => response !== null && response.remaining <= 0,
+		);
+		if (exhausted) return [new ThrottleException(exhausted), null];
+		let result: T;
+		try {
+			result = await callback();
+		} catch (error) {
+			const counted = await this.increment();
+			for (const [index, response] of counted.entries()) {
+				const entry = this.#limiters[index];
+				if (
+					entry !== undefined &&
+					entry.limiter.blockDuration > 0 &&
+					response.consumed >= response.limit
+				) {
+					await entry.limiter.block(entry.key, entry.limiter.blockDuration);
+				}
+			}
+			throw error;
+		}
+		await this.delete();
+		return [null, result];
+	}
+}
+
 // ── HTTP ─────────────────────────────────────────────────────────────────
 
 /** What a throttle middleware reads off the HTTP context. */
@@ -799,7 +1278,8 @@ export type ThrottleMiddleware = (
 /** Hands out limiters, one per store and budget, and defines throttles. */
 export class LimiterManager {
 	readonly config: LimiterConfig;
-	readonly #limiters = new Map<string, Limiter>();
+	/** The limiters handed out, by store name, then by budget. */
+	readonly #limiters = new Map<string, Map<string, Limiter>>();
 
 	constructor(config: LimiterConfig) {
 		if (!config.stores[config.default]) {
@@ -837,11 +1317,47 @@ export class LimiterManager {
 			options.duration,
 			options.blockDuration ?? "",
 		].join("|");
-		const cached = this.#limiters.get(id);
+		let storeLimiters = this.#limiters.get(store);
+		if (storeLimiters === undefined) {
+			storeLimiters = new Map();
+			this.#limiters.set(store, storeLimiters);
+		}
+		const cached = storeLimiters.get(id);
 		if (cached) return cached;
 		const limiter = new Limiter(factory(), options);
-		this.#limiters.set(id, limiter);
+		storeLimiters.set(id, limiter);
 		return limiter;
+	}
+
+	/**
+	 * Several limits counted together, each on its own key, in the default
+	 * store or in the named one:
+	 *
+	 *   limiter.multi([
+	 *     { key: `login_${ip}`, requests: 5, duration: '1 minute' },
+	 *     { key: `login_${ip}`, requests: 100, duration: '1 day' },
+	 *   ])
+	 */
+	multi(options: MultiLimiterOptions[]): MultiLimiter;
+	multi(store: string, options: MultiLimiterOptions[]): MultiLimiter;
+	multi(
+		storeOrOptions: string | MultiLimiterOptions[],
+		maybe?: MultiLimiterOptions[],
+	): MultiLimiter {
+		const store =
+			typeof storeOrOptions === "string" ? storeOrOptions : this.config.default;
+		const options = typeof storeOrOptions === "string" ? maybe : storeOrOptions;
+		if (options === undefined || options.length === 0) {
+			throw new Error(
+				"[blackhole] limiter.multi() needs the options of one or more limiters.",
+			);
+		}
+		return new MultiLimiter(
+			options.map(({ key, ...budget }) => ({
+				key,
+				limiter: this.use(store, budget),
+			})),
+		);
 	}
 
 	/** Start an HTTP limit: `allowRequests(n).every(duration)…`. */
@@ -869,9 +1385,17 @@ export class LimiterManager {
 		return defineThrottle(name, builder);
 	}
 
-	/** Forget every key of every limiter handed out so far. */
-	async clear(): Promise<void> {
-		for (const limiter of this.#limiters.values()) await limiter.clear();
+	/**
+	 * Forget every key of the limiters handed out so far — in every store, or
+	 * in the named ones only. A store no limiter was handed out from is left
+	 * alone, as upstream does.
+	 */
+	async clear(stores?: string[]): Promise<void> {
+		for (const store of stores ?? Object.keys(this.config.stores)) {
+			const storeLimiters = this.#limiters.get(store);
+			if (storeLimiters === undefined) continue;
+			for (const limiter of storeLimiters.values()) await limiter.clear();
+		}
 	}
 }
 

@@ -22,6 +22,8 @@ import {
 	LimiterManager,
 	type LimiterOptions,
 	limiterStores,
+	type MultiLimiter,
+	type MultiLimiterOptions,
 	type ThrottleMiddleware,
 } from "../limiter.js";
 
@@ -64,9 +66,28 @@ function use(
 	return manager().use(storeOrOptions, options);
 }
 
+function multi(options: MultiLimiterOptions[]): MultiLimiter;
+function multi(store: string, options: MultiLimiterOptions[]): MultiLimiter;
+function multi(
+	storeOrOptions: string | MultiLimiterOptions[],
+	options?: MultiLimiterOptions[],
+): MultiLimiter {
+	if (typeof storeOrOptions !== "string") {
+		return manager().multi(storeOrOptions);
+	}
+	if (options === undefined) {
+		throw new Error(
+			"[blackhole] limiter.multi(store, options) needs the options of one or more limiters.",
+		);
+	}
+	return manager().multi(storeOrOptions, options);
+}
+
 const limiter = {
 	/** A limiter in the default store, or in the named one. */
 	use,
+	/** Several limits counted together, each on its own key. */
+	multi,
 	/** Start an HTTP limit: `allowRequests(n).every(duration)…`. */
 	allowRequests(requests: number): HttpLimiter {
 		return new HttpLimiter(manager).allowRequests(requests);
@@ -87,9 +108,9 @@ const limiter = {
 	): ThrottleMiddleware {
 		return defineThrottle(name, builder);
 	},
-	/** Forget every key of every limiter handed out so far. */
-	clear(): Promise<void> {
-		return manager().clear();
+	/** Forget every key of the limiters handed out so far, in every store or the named ones. */
+	clear(stores?: string[]): Promise<void> {
+		return manager().clear(stores);
 	},
 };
 

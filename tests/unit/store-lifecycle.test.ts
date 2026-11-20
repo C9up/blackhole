@@ -9,6 +9,10 @@
 
 import { describe, expect, it, vi } from "vitest";
 import {
+	type LimiterRedisClient,
+	RedisLimiterStore,
+} from "../../src/limiter.js";
+import {
 	MemoryRateLimitStore,
 	type RateLimitRedisClient,
 	RedisRateLimitStore,
@@ -73,5 +77,90 @@ describe("blackhole > RedisRateLimitStore", () => {
 		await store.increment("client", 60);
 
 		expect(expireCalls()).toBe(1);
+	});
+});
+
+/**
+ * Quasar retires a connection whose socket ended for good (its retry strategy
+ * gave up) and hands out a fresh one on the next `connection(name)`. Both
+ * Redis stores kept the first one, so every rate-limited request failed with
+ * "Connection is closed." until the process restarted, even once Redis was back.
+ */
+describe("blackhole > a Redis store whose connection ended for good", () => {
+	function rateClient(status: string) {
+		return {
+			status,
+			incr: vi.fn(async () => 1),
+			expire: vi.fn(async () => 1),
+			ttl: vi.fn(async () => 60),
+		};
+	}
+
+	function limiterClient(status: string) {
+		return {
+			status,
+			incrby: vi.fn(async () => 1),
+			pexpire: vi.fn(async () => 1),
+			pttl: vi.fn(async () => 60_000),
+			get: vi.fn(async (): Promise<string | null> => null),
+			set: vi.fn(async () => "OK"),
+			del: vi.fn(async () => 0),
+			scan: vi.fn(async (): Promise<[string, string[]]> => ["0", []]),
+		};
+	}
+
+	it("RedisRateLimitStore asks its resolver again", async () => {
+		const first = rateClient("ready");
+		const second = rateClient("ready");
+		const resolver = vi
+			.fn<() => RateLimitRedisClient>()
+			.mockReturnValueOnce(first)
+			.mockReturnValueOnce(second);
+		const store = new RedisRateLimitStore(resolver);
+
+		await store.increment("ip", 60);
+		first.status = "end";
+		await store.increment("ip", 60);
+
+		expect(resolver).toHaveBeenCalledTimes(2);
+		expect(second.incr).toHaveBeenCalledOnce();
+	});
+
+	it("RedisLimiterStore asks its resolver again", async () => {
+		const first = limiterClient("ready");
+		const second = limiterClient("ready");
+		const resolver = vi
+			.fn<() => LimiterRedisClient>()
+			.mockReturnValueOnce(first)
+			.mockReturnValueOnce(second);
+		const store = new RedisLimiterStore(resolver);
+
+		await store.get("ip");
+		first.status = "end";
+		await store.get("ip");
+
+		expect(resolver).toHaveBeenCalledTimes(2);
+		expect(second.get).toHaveBeenCalledOnce();
+	});
+
+	it("keeps a client that closed but reconnects by itself", async () => {
+		const client = limiterClient("ready");
+		const resolver = vi.fn(() => client);
+		const store = new RedisLimiterStore(resolver);
+
+		await store.get("ip");
+		client.status = "close";
+		await store.get("ip");
+
+		expect(resolver).toHaveBeenCalledOnce();
+	});
+
+	it("keeps a client handed in directly", async () => {
+		const client = rateClient("end");
+		const store = new RedisRateLimitStore(client);
+
+		await store.increment("ip", 60);
+
+		expect(client.incr).toHaveBeenCalledOnce();
 	});
 });

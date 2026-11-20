@@ -1,0 +1,29 @@
+---
+to: database/migrations/9100_create_rate_limits.ts
+---
+import { Migration } from "@c9up/atlas";
+
+/**
+ * The table the database limiter store counts in
+ * (`limiterStores.database({ tableName: "rate_limits" })`).
+ *
+ * The store empties the whole table on `limiter.clear()`: keep it for the
+ * limiter alone.
+ */
+export default class CreateRateLimits extends Migration {
+	async up() {
+		this.schema.createTable("rate_limits", (t) => {
+			// Well inside MySQL's InnoDB utf8mb4 index limit; the store keeps a
+			// longer key as its SHA-256 rather than failing the insert.
+			t.string("key", 255).primary();
+			t.integer("points").notNullable().defaultTo(0);
+			// Epoch milliseconds: when the window, or the block, ends.
+			t.bigInteger("expire").nullable();
+			t.index("expire");
+		});
+	}
+
+	async down() {
+		this.schema.dropTable("rate_limits");
+	}
+}

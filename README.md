@@ -304,7 +304,10 @@ first use, never required. Its migration is
 `stubs/database/migrations/9100_create_rate_limits.stub`.
 
 `limiter.multi([...])` counts several limits at once, each on its own key;
-`limiter.clear(['redis'])` clears the named stores only.
+`limiter.clear(['redis'])` clears the named stores only. `clear()` empties the
+stores themselves — Redis's prefix, the database's table — even from a process
+that has not used them yet (a fresh test run, a second instance); upstream
+reaches only the stores a limiter was handed out from in this process.
 
 ## Entry points
 

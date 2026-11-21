@@ -191,6 +191,27 @@ describe("blackhole > limiter.clear(stores)", () => {
 		expect(await b.get("k")).toBeNull();
 	});
 
+	it("empties a shared store from a process that never used it (a fresh test run, a second instance)", async () => {
+		// One store two processes share, as Redis is: the same keys whoever opens it.
+		const shared = limiterStores.memory()();
+		const shared_factory = () => shared;
+		const first = new LimiterManager({
+			default: "redis",
+			stores: { redis: shared_factory },
+		});
+		await first.use({ requests: 1, duration: 3600 }).consume("k");
+		const fresh = new LimiterManager({
+			default: "redis",
+			stores: { redis: shared_factory },
+		});
+		await fresh.clear();
+		// Before: only the limiters this process handed out were cleared, and
+		// this consume threw ThrottleException.
+		await expect(
+			fresh.use({ requests: 1, duration: 3600 }).consume("k"),
+		).resolves.toBeDefined();
+	});
+
 	it("passes the list through the limiter service", async () => {
 		const m = new LimiterManager({
 			default: "a",

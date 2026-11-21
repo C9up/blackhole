@@ -1386,15 +1386,26 @@ export class LimiterManager {
 	}
 
 	/**
-	 * Forget every key of the limiters handed out so far — in every store, or
-	 * in the named ones only. A store no limiter was handed out from is left
-	 * alone, as upstream does.
+	 * Empty every store — or the named ones only — whether this process has
+	 * handed out limiters from it or not.
+	 *
+	 * NAMED DEVIATION from @adonisjs/limiter, whose `clear()` reaches only the
+	 * stores a limiter was handed out from in this process: a fresh process
+	 * (a test run, a second instance) clearing a shared Redis or database
+	 * store left the counters another one wrote, and the next `consume`
+	 * throttled. Here a store's own `clear()` runs as well — for Redis, every
+	 * key of its prefix; for the database, its table — on a store built for
+	 * the purpose; the memory stores of the handed-out limiters are cleared
+	 * one by one, as before (each limiter has its own).
 	 */
 	async clear(stores?: string[]): Promise<void> {
 		for (const store of stores ?? Object.keys(this.config.stores)) {
-			const storeLimiters = this.#limiters.get(store);
-			if (storeLimiters === undefined) continue;
-			for (const limiter of storeLimiters.values()) await limiter.clear();
+			const factory = this.config.stores[store];
+			if (factory === undefined) continue;
+			for (const limiter of this.#limiters.get(store)?.values() ?? []) {
+				await limiter.clear();
+			}
+			await factory().clear();
 		}
 	}
 }

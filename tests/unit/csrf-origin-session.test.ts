@@ -233,7 +233,8 @@ describe("blackhole > the session's CSRF secret turns over with the session id",
 		const secret = session.get("csrf-secret");
 		const second = await visit(session, () => {}, first);
 		expect(session.get("csrf-secret")).toBe(secret);
-		expect(second.cookies["XSRF-TOKEN"]).toBeUndefined();
+		// Sent again, unchanged: a client that cannot read its jar learns it here.
+		expect(second.cookies["XSRF-TOKEN"]).toBe(first);
 		expect((await post(session, first)).nextCalled).toBe(true);
 	});
 });

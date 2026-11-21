@@ -111,7 +111,7 @@ describe("blackhole > an exempt route still seeds the cookie", () => {
 		expect(outcome.setCookie?.value).toBe(outcome.csrfToken);
 	});
 
-	it("does not re-issue one the client already holds", () => {
+	it("sends back the one the client already holds, unchanged", () => {
 		const token = createBlackhole({
 			secret: "x".repeat(32),
 		}).generateCsrfToken();
@@ -121,7 +121,9 @@ describe("blackhole > an exempt route still seeds the cookie", () => {
 		const outcome = runRequestPhase(bh(), req);
 
 		if (outcome.kind !== "pass") throw new Error("expected pass");
-		expect(outcome.setCookie).toBeUndefined();
+		// As upstream: on every response, so a client that cannot read its
+		// jar (an app on a phone) learns the token from any answer.
+		expect(outcome.setCookie?.value).toBe(token);
 		expect(outcome.csrfToken).toBe(token);
 	});
 
@@ -151,7 +153,7 @@ describe("blackhole > a cookie that no longer verifies is reissued", () => {
 
 		if (outcome.kind !== "pass") throw new Error("expected pass");
 		expect(outcome.csrfToken).toBe(token);
-		expect(outcome.setCookie).toBeUndefined();
+		expect(outcome.setCookie?.value).toBe(token);
 	});
 
 	it("replaces one that was mangled in transit", () => {

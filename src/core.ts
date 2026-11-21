@@ -427,10 +427,13 @@ export function runCsrfPhase(bh: Blackhole, req: CoreRequest): CsrfOutcome {
 		// sends the token in the `_csrf` field and has no use for it. Exemption
 		// skips VERIFICATION, not the cookie: a page served from an exempt route
 		// still hands the client a token for its next protected request.
-		setCookie:
-			existing || !bh.xsrfCookieEnabled()
-				? undefined
-				: { name, value: csrfToken, options },
+		// Set on every response, a usable token included (its value unchanged),
+		// as upstream's guard does: a client that cannot read its cookie jar —
+		// an app on a phone, whose cookies live in the platform's store — learns
+		// the token from any answer, not only from the first one it ever got.
+		setCookie: bh.xsrfCookieEnabled()
+			? { name, value: csrfToken, options }
+			: undefined,
 		cspNonce,
 	};
 }

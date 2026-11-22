@@ -78,11 +78,18 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with: { version: 9 }
+        with: { version: 12.21.0 }
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '24'
+      # pnpm reads its settings (seven-day release age, allowed install
+      # scripts) from pnpm-workspace.yaml; .github/pnpm-ci.yaml says why it
+      # is kept there.
+      - run: cp .github/pnpm-ci.yaml pnpm-workspace.yaml
       - run: pnpm install --no-frozen-lockfile
+      # What this install put on the runner, devDependencies included,
+      # carries no high, critical or unpatched advisory.
+      - run: node .github/scripts/npm-audit.mjs --installed
       - run: pnpm exec tsc -p tsconfig.build.json --noEmit
       # And the tests: `tsconfig.build.json` leaves them out, so every type a
       # test relies on went ungated until this step ran the project's own
@@ -108,7 +115,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with: { version: 9 }
+        with: { version: 12.21.0 }
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '24'
@@ -125,8 +132,15 @@ jobs:
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
+      # pnpm reads its settings (seven-day release age, allowed install
+      # scripts) from pnpm-workspace.yaml; .github/pnpm-ci.yaml says why it
+      # is kept there.
+      - run: cp .github/pnpm-ci.yaml pnpm-workspace.yaml
       - name: Install dependencies
         run: pnpm install
+      # What this install put on the runner, devDependencies included,
+      # carries no high, critical or unpatched advisory.
+      - run: node .github/scripts/npm-audit.mjs --installed
 
       - name: Build NAPI binary
         run: pnpm build:napi
@@ -217,12 +231,19 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with: { version: 9 }
+        with: { version: 12.21.0 }
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '24'
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      # pnpm reads its settings (seven-day release age, allowed install
+      # scripts) from pnpm-workspace.yaml; .github/pnpm-ci.yaml says why it
+      # is kept there.
+      - run: cp .github/pnpm-ci.yaml pnpm-workspace.yaml
       - run: pnpm install
+      # What this install put on the runner, devDependencies included,
+      # carries no high, critical or unpatched advisory.
+      - run: node .github/scripts/npm-audit.mjs --installed
       - run: pnpm build:napi
       - run: pnpm exec vitest run --coverage
 
@@ -281,7 +302,7 @@ jobs:
         with:
           fetch-depth: 0
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-        with: { version: 9 }
+        with: { version: 12.21.0 }
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '24'
@@ -380,7 +401,14 @@ jobs:
             echo "dist_tag=latest" >> "$GITHUB_OUTPUT"
           fi
 
+      # pnpm reads its settings (seven-day release age, allowed install
+      # scripts) from pnpm-workspace.yaml; .github/pnpm-ci.yaml says why it
+      # is kept there.
+      - run: cp .github/pnpm-ci.yaml pnpm-workspace.yaml
       - run: pnpm install
+      # What this install put on the runner, devDependencies included,
+      # carries no high, critical or unpatched advisory.
+      - run: node .github/scripts/npm-audit.mjs --installed
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: blackhole-napi-*

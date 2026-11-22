@@ -155,7 +155,7 @@ jobs:
             echo "::error::0 tests ran — test discovery is broken (check vitest include glob)"
             exit 1
           fi
-          skipped=$(jq '[.testResults[].assertionResults[] | select(.status=="skipped")] | length' test-results.json)
+          skipped=$(jq '[.testResults[].assertionResults[] | select(.status != "passed" and .status != "failed")] | length' test-results.json)
           if [ "$skipped" -ne 0 ]; then
             echo "::error::$skipped tests skipped — check NAPI binary load path"
             exit 1

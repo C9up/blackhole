@@ -66,7 +66,12 @@ describe("blackhole > secret given as a Secret", () => {
 				csrf: true,
 				secret: new Secret("change-me-to-a-unique-32+-byte-secret!!"),
 			}),
-		).toThrow(/placeholder/);
+		).toThrow(
+			expect.objectContaining({
+				code: "E_BLACKHOLE_WEAK_SECRET",
+				message: expect.stringMatching(/placeholder/),
+			}),
+		);
 		expect(() =>
 			createBlackhole({ csrf: true, secret: new Secret("short") }),
 		).toThrow(/too short/);
@@ -77,10 +82,13 @@ describe("blackhole > secret given as a Secret", () => {
 		// not the compiler, is what stands between it and the HMAC key.
 		const untyped = (secret: unknown, csrf: boolean) => () =>
 			Reflect.apply(createBlackhole, undefined, [{ csrf, secret }]);
-		expect(untyped(new Secret(KEY.length), true)).toThrow(TypeError);
-		expect(untyped(new Secret(undefined), false)).toThrow(TypeError);
-		expect(untyped({ release: "not-a-function" }, true)).toThrow(TypeError);
-		expect(untyped(42, true)).toThrow(TypeError);
+		const invalid = expect.objectContaining({
+			code: "E_BLACKHOLE_INVALID_SECRET",
+		});
+		expect(untyped(new Secret(KEY.length), true)).toThrow(invalid);
+		expect(untyped(new Secret(undefined), false)).toThrow(invalid);
+		expect(untyped({ release: "not-a-function" }, true)).toThrow(invalid);
+		expect(untyped(42, true)).toThrow(invalid);
 	});
 });
 

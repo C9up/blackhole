@@ -205,7 +205,7 @@ export async function runStoreRateLimit(
 		kind: "reject",
 		status: 429,
 		body: {
-			error: { code: "E_BLACKHOLE_RATE_LIMITED", message: "Too many requests" },
+			error: { code: "E_TOO_MANY_REQUESTS", message: "Too many requests" },
 		},
 		headers: { ...headers, "Retry-After": String(decision.resetSeconds) },
 	};

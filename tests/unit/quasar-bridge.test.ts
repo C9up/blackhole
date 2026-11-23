@@ -60,9 +60,12 @@ describe("blackhole > the quasar bridge", () => {
 			throw new Error("Cannot find module");
 		});
 
-		await expect((await load())("limiter")).rejects.toThrow(
-			/@c9up\/quasar is not installed[\s\S]*pass a client instead/,
-		);
+		await expect((await load())("limiter")).rejects.toMatchObject({
+			code: "E_BLACKHOLE_QUASAR_MISSING",
+			message: expect.stringMatching(
+				/@c9up\/quasar is not installed[\s\S]*pass a client instead/,
+			),
+		});
 	});
 
 	it("names the connection that was asked for", async () => {
@@ -88,9 +91,10 @@ describe("blackhole > the quasar bridge", () => {
 
 		// Naming them is the point: "does not work" sends the reader to the
 		// wrong package.
-		await expect((await load())("limiter")).rejects.toThrow(
-			/'limiter' is missing incr, expire, ttl/,
-		);
+		await expect((await load())("limiter")).rejects.toMatchObject({
+			code: "E_BLACKHOLE_INCOMPLETE_CONNECTION",
+			message: expect.stringMatching(/'limiter' is missing incr, expire, ttl/),
+		});
 	});
 
 	it("names just the one that is missing", async () => {

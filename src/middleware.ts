@@ -31,6 +31,7 @@ import {
 	runStoreRateLimit,
 	TRUSTED_HTML_FLAG,
 } from "./core.js";
+import { E_BAD_CSRF_TOKEN, E_BLACKHOLE_NOT_REGISTERED } from "./errors.js";
 import {
 	type Blackhole,
 	type BlackholeOptions,
@@ -180,9 +181,7 @@ async function resolveBlackhole(ctx: ReamContext): Promise<Blackhole> {
 	// framework-agnostic at runtime while still builds standalone.
 	const resolved = await ctx.containerResolver?.make(BLACKHOLE_KEY);
 	if (!isBlackhole(resolved)) {
-		throw new Error(
-			"[BLACKHOLE_NOT_REGISTERED] BlackholeProvider must register BLACKHOLE_KEY before the middleware runs, and the host must expose ctx.containerResolver.",
-		);
+		throw new E_BLACKHOLE_NOT_REGISTERED();
 	}
 	return resolved;
 }
@@ -423,10 +422,14 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 	const outcome = runCsrfPhase(bh, coreRequest(ctx, "", session?.secret()));
 	if (outcome.kind === "reject") {
 		applySecurityHeaders(ctx, bh);
-		const body = translateCsrfRejection(ctx, outcome.body);
-		if (handleCsrfRejectionForBrowser(ctx, body)) return;
+		if (isBadCsrfBody(outcome.body)) {
+			// As upstream: the exception handler renders it, inside the chain,
+			// so the session middleware still commits the flash the redirect
+			// back carries. An application can catch or customise it there.
+			throw new E_BAD_CSRF_TOKEN();
+		}
 		ctx.response.status(outcome.status);
-		ctx.response.json(body);
+		ctx.response.json(outcome.body);
 		return;
 	}
 
@@ -493,108 +496,13 @@ export default class BlackholeMiddleware {
 
 export { type Blackhole, type BlackholeOptions, createBlackhole };
 
-/** The keys Adonis keeps out of the re-flashed form on a CSRF failure. */
-const CSRF_FLASH_EXCEPT = [
-	"_csrf",
-	"_method",
-	"password",
-	"password_confirmation",
-];
-
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
+/** Whether the engine's refusal is a rejected CSRF token. */
 function isBadCsrfBody(body: unknown): boolean {
 	if (!isRecord(body)) return false;
 	const error = body.error;
 	return isRecord(error) && error.code === "E_BAD_CSRF_TOKEN";
-}
-
-/** The translation key of the CSRF rejection message. */
-const CSRF_MESSAGE_IDENTIFIER = "errors.E_BAD_CSRF_TOKEN";
-
-/**
- * The CSRF rejection with its message translated, when the request carries a
- * translator (`ctx.i18n.t(key, data, fallback)`) — the English message
- * otherwise, and anything that is not a CSRF token rejection unchanged.
- */
-function translateCsrfRejection(ctx: ReamContext, body: unknown): unknown {
-	if (!isBadCsrfBody(body) || !isRecord(body) || !isRecord(body.error)) {
-		return body;
-	}
-	const fallback =
-		typeof body.error.message === "string"
-			? body.error.message
-			: "Invalid or expired CSRF token";
-	const i18n: unknown = Reflect.get(Object(ctx), "i18n");
-	const t: unknown = isRecord(i18n) ? i18n.t : undefined;
-	if (!isRecord(i18n) || typeof t !== "function") return body;
-	const translated: unknown = Reflect.apply(t, i18n, [
-		CSRF_MESSAGE_IDENTIFIER,
-		{},
-		fallback,
-	]);
-	const message = typeof translated === "string" ? translated : fallback;
-	return { ...body, error: { ...body.error, message } };
-}
-
-/**
- * Turn a CSRF rejection into a flash and a redirect back for a browser: flash
- * the submitted form back (minus the token, the method override and any
- * password), flash the message, and redirect to the previous page.
- *
- * An Inertia visit (`X-Inertia`) takes the same redirect — its client follows
- * it and shows the flashed error — but does not re-flash the form: Inertia
- * keeps the form's state on the client.
- *
- * A JSON client still gets the JSON body: redirecting a fetch or an XHR would
- * swallow the failure.
- *
- * Returns whether it handled the response. Everything it needs is duck-typed:
- * blackhole does not depend on a session or a redirect builder existing, and a
- * host that has neither falls through to the JSON reply.
- */
-function handleCsrfRejectionForBrowser(
-	ctx: ReamContext,
-	body: unknown,
-): boolean {
-	if (!isBadCsrfBody(body)) return false;
-
-	const inertia = Boolean(ctx.request.header("x-inertia"));
-	const accept = ctx.request.header("accept") ?? "";
-	// An explicit JSON request, an XHR, or a client that never asked for HTML
-	// gets the JSON body — redirecting those would swallow the failure.
-	if (!inertia && !accept.includes("text/html")) return false;
-
-	const session = Reflect.get(Object(ctx), "session");
-	const redirect = Reflect.get(Object(ctx.response), "redirect");
-	if (!isRecord(session) || typeof redirect !== "function") return false;
-
-	const message =
-		(isRecord(body) &&
-		isRecord(body.error) &&
-		typeof body.error.message === "string"
-			? body.error.message
-			: undefined) ?? "Invalid or expired CSRF token";
-
-	if (!inertia) callIfFunction(session, "flashExcept", CSRF_FLASH_EXCEPT);
-	callIfFunction(session, "flash", "error", message);
-	callIfFunction(session, "flashErrors", { E_BAD_CSRF_TOKEN: message });
-
-	const builder = Reflect.apply(redirect, ctx.response, []);
-	const back = isRecord(builder) ? builder.back : undefined;
-	if (typeof back !== "function") return false;
-	Reflect.apply(back, builder, []);
-	return true;
-}
-
-/** Call `name` on `target` when it is there — the host may implement only some. */
-function callIfFunction(
-	target: Record<string, unknown>,
-	name: string,
-	...args: unknown[]
-): void {
-	const fn = target[name];
-	if (typeof fn === "function") Reflect.apply(fn, target, args);
 }

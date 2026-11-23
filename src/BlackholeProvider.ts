@@ -9,7 +9,12 @@
  *   // adonisrc.ts / reamrc.ts
  *   providers: [() => import('@c9up/blackhole/provider')]
  */
+
 import type { BlackholeConfig } from "./config.js";
+import {
+	E_BLACKHOLE_NO_DEFAULT_STORE,
+	E_BLACKHOLE_UNKNOWN_STORE,
+} from "./errors.js";
 import {
 	assertNoRetiredOptions,
 	type BlackholeOptions,
@@ -56,21 +61,18 @@ function resolveRateLimit(
 		const selected = stores[name];
 		if (!selected) {
 			const known = Object.keys(stores);
-			throw new Error(
-				`[blackhole] config.blackhole.rateLimit names the store '${name}', which is not in \`stores\`. ` +
+			throw new E_BLACKHOLE_UNKNOWN_STORE([
+				`config.blackhole.rateLimit names the store '${name}', which is not in \`stores\`. ` +
 					(known.length > 0
 						? `Declared: ${known.join(", ")}.`
 						: "`stores` is empty — declare one with stores.memory() or stores.redis()."),
-			);
+			]);
 		}
 		return { ...rest, store: selected() };
 	}
 
 	if (stores && name === undefined) {
-		throw new Error(
-			"[blackhole] config.blackhole.rateLimit declares `stores` but no `default` naming which one counts. " +
-				`Set default to one of: ${Object.keys(stores).join(", ")}.`,
-		);
+		throw new E_BLACKHOLE_NO_DEFAULT_STORE([Object.keys(stores).join(", ")]);
 	}
 
 	return { ...rest, store };

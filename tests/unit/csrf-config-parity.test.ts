@@ -234,12 +234,20 @@ describe("blackhole > the CSRF secret has to be a real one", () => {
 
 	it("refuses one too short to sign with", () => {
 		expect(() => createBlackhole({ csrf: true, secret: "short" })).toThrow(
-			/too short to sign with/,
+			expect.objectContaining({
+				code: "E_BLACKHOLE_WEAK_SECRET",
+				message: expect.stringMatching(/too short to sign with/),
+			}),
 		);
 	});
 
 	it("still refuses an absent secret", () => {
-		expect(() => createBlackhole({ csrf: true })).toThrow(/no `secret`/);
+		expect(() => createBlackhole({ csrf: true })).toThrow(
+			expect.objectContaining({
+				code: "E_BLACKHOLE_SECRET_MISSING",
+				message: expect.stringMatching(/no `secret`/),
+			}),
+		);
 	});
 
 	it("accepts a real one", () => {

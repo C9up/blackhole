@@ -8,6 +8,10 @@
  * them — stays here, because that is the part a reader needs.
  */
 
+import {
+	E_BLACKHOLE_INCOMPLETE_CONNECTION,
+	E_BLACKHOLE_QUASAR_MISSING,
+} from "./errors.js";
 import type { RateLimitRedisClient } from "./stores.js";
 import {
 	hasCommands,
@@ -32,6 +36,9 @@ export async function quasarConnection(
 		isConnection: isRateLimitRedisClient,
 		what: "the rate-limit counter",
 		alternative: "or pass a client instead of a connection name",
-		raise: (_reason, message, cause) => new Error(message, { cause }),
+		raise: (reason, message, cause) =>
+			reason === "quasar-missing"
+				? new E_BLACKHOLE_QUASAR_MISSING([message], { cause })
+				: new E_BLACKHOLE_INCOMPLETE_CONNECTION([message], { cause }),
 	});
 }

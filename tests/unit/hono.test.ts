@@ -124,7 +124,7 @@ describe("blackhole > blackholeHono", () => {
 		expect(second.status).toBe(429);
 		expect(second.headers.get("retry-after")).not.toBeNull();
 		expect(await second.json()).toMatchObject({
-			error: { code: "E_BLACKHOLE_RATE_LIMITED" },
+			error: { code: "E_TOO_MANY_REQUESTS" },
 		});
 	});
 

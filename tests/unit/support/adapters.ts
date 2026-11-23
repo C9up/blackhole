@@ -13,7 +13,7 @@ import { blackholeFastify } from "../../../src/fastify.js";
 import { blackholeHono } from "../../../src/hono.js";
 import { type BlackholeOptions, createBlackhole } from "../../../src/index.js";
 import { blackholeMiddleware } from "../../../src/middleware.js";
-import { reamContext } from "./ream.js";
+import { reamContext, withExceptionHandler } from "./ream.js";
 
 export interface AdapterRequest {
 	method?: string;
@@ -69,7 +69,7 @@ async function viaReam(
 		route: req.routePattern ? { pattern: req.routePattern } : undefined,
 	});
 	let routeRan = false;
-	await blackholeMiddleware(built.ctx, async () => {
+	await withExceptionHandler(blackholeMiddleware)(built.ctx, async () => {
 		routeRan = true;
 		for (const [name, value] of Object.entries(req.routeHeaders ?? {})) {
 			built.ctx.response.header(name, value);

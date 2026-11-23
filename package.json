@@ -74,7 +74,7 @@
   },
   "peerDependencies": {
     "@c9up/quasar": "^0.1.0 || ^0.2.0",
-    "@c9up/ream": "^0.2.26",
+    "@c9up/ream": "^0.2.32",
     "hono": "^4.0.0"
   },
   "peerDependenciesMeta": {
@@ -88,9 +88,12 @@
       "optional": true
     }
   },
+  "dependencies": {
+    "@c9up/flare": "^0.1.0"
+  },
   "devDependencies": {
     "@biomejs/biome": "^2.6.8",
-    "@c9up/ream": "^0.2.26",
+    "@c9up/ream": "^0.2.32",
     "@types/node": "^22.20.1",
     "@vitest/coverage-v8": "4.1.12",
     "hono": "^4.13.10",

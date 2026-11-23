@@ -14,6 +14,7 @@
  * throttled.
  */
 
+import { E_BLACKHOLE_LIMITER_OPTIONS_MISSING } from "../errors.js";
 import {
 	defineThrottle,
 	HttpLimiter,
@@ -59,9 +60,9 @@ function use(
 ): Limiter {
 	if (typeof storeOrOptions !== "string") return manager().use(storeOrOptions);
 	if (options === undefined) {
-		throw new Error(
-			"[blackhole] limiter.use(store, options) needs the allowed requests and the duration.",
-		);
+		throw new E_BLACKHOLE_LIMITER_OPTIONS_MISSING([
+			"limiter.use(store, options) needs the allowed requests and the duration.",
+		]);
 	}
 	return manager().use(storeOrOptions, options);
 }
@@ -76,9 +77,9 @@ function multi(
 		return manager().multi(storeOrOptions);
 	}
 	if (options === undefined) {
-		throw new Error(
-			"[blackhole] limiter.multi(store, options) needs the options of one or more limiters.",
-		);
+		throw new E_BLACKHOLE_LIMITER_OPTIONS_MISSING([
+			"limiter.multi(store, options) needs the options of one or more limiters.",
+		]);
 	}
 	return manager().multi(storeOrOptions, options);
 }

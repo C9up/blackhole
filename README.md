@@ -85,7 +85,10 @@ csrf: {
 }
 ```
 
-A rejected token answers `E_BAD_CSRF_TOKEN` (403). On Ream, a browser form or
+A rejected token answers `E_BAD_CSRF_TOKEN` (403). On Ream, the middleware
+throws `errors.E_BAD_CSRF_TOKEN` and the exception handler renders it inside the
+middleware chain (`@c9up/ream` 0.2.32 or later), so your exception handler can
+catch or customise it. It renders itself: a browser form or
 an Inertia visit (`X-Inertia`) is redirected back with the message flashed
 (the form fields too, except for Inertia); a JSON client gets the JSON body.
 With an `i18n` on the context, the message is translated under

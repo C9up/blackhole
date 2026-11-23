@@ -7,10 +7,14 @@ import { createBlackhole } from "../../src/index.js";
 
 const SECRET = "test-app-key-32-bytes-long-aaaaaa";
 
+/** The middleware run as the host runs it: through its exception handler. */
+const hosted = withExceptionHandler(blackholeMiddleware);
+
 import BlackholeMiddleware, {
 	blackholeMiddleware,
 	type ReamContext,
 } from "../../src/middleware.js";
+import { withExceptionHandler } from "./support/ream.js";
 
 // The middleware resolves its Blackhole instance from `ctx.containerResolver`
 // (Ream's per-request IoC resolver) — NOT from a `@c9up/ream` import. One shared
@@ -109,6 +113,18 @@ function makeReamContext(opts: {
 }
 
 describe("blackhole > blackholeMiddleware (Ream)", () => {
+	it("refuses to run when the host resolves no Blackhole instance", async () => {
+		const { ctx } = makeReamContext({});
+		const bare: ReamContext = {
+			request: ctx.request,
+			store: ctx.store,
+			response: ctx.response,
+		};
+		await expect(blackholeMiddleware(bare, () => {})).rejects.toMatchObject({
+			code: "E_BLACKHOLE_NOT_REGISTERED",
+		});
+	});
+
 	it("calls next() and forwards response when the request is allowed", async () => {
 		const { ctx } = makeReamContext({});
 		let nextCalled = false;
@@ -207,7 +223,7 @@ describe("blackhole > blackholeMiddleware (Ream)", () => {
 	it("rejects a CSRF-failing POST with the blocker's status + parsed JSON body", async () => {
 		const { ctx, spy } = makeReamContext({ method: "POST", path: "/api/x" });
 		let nextCalled = false;
-		await blackholeMiddleware(ctx, () => {
+		await hosted(ctx, () => {
 			nextCalled = true;
 		});
 		expect(nextCalled).toBe(false);
@@ -227,7 +243,7 @@ describe("blackhole > blackholeMiddleware (Ream)", () => {
 			// non-text content-type on the request — irrelevant for the
 			// rejection branch but keeps the request shape minimal.
 		});
-		await blackholeMiddleware(ctx, () => {});
+		await hosted(ctx, () => {});
 		// The default rejection envelope is JSON, so safeJsonParse takes the
 		// happy path. Either way, the body must surface a parsed object —
 		// proves the safeJsonParse contract delivers an object, never the

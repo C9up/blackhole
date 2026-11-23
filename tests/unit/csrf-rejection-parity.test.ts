@@ -13,10 +13,14 @@
  */
 import { describe, expect, it, vi } from "vitest";
 import { BLACKHOLE_KEY } from "../../src/BlackholeProvider.js";
-import { createBlackhole } from "../../src/index.js";
+import { createBlackhole, errors } from "../../src/index.js";
 import { blackholeMiddleware, type ReamContext } from "../../src/middleware.js";
+import { withExceptionHandler } from "./support/ream.js";
 
 const SECRET = "test-app-key-32-bytes-long-aaaaaa";
+
+/** The middleware run as the host runs it: through its exception handler. */
+const hosted = withExceptionHandler(blackholeMiddleware);
 const bh = createBlackhole({ secret: SECRET, csrf: true });
 
 function makeContext(accept: string, withSession = true) {
@@ -62,10 +66,30 @@ function makeContext(accept: string, withSession = true) {
 }
 
 describe("blackhole > CSRF rejection (AdonisJS Shield parity)", () => {
+	it("throws E_BAD_CSRF_TOKEN for the exception handler to render", async () => {
+		const { ctx, back, json, status } = makeContext("text/html");
+		let reached = false;
+
+		const thrown: unknown = await blackholeMiddleware(ctx, () => {
+			reached = true;
+		}).then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+
+		expect(thrown).toBeInstanceOf(errors.E_BAD_CSRF_TOKEN);
+		expect(thrown).toMatchObject({ code: "E_BAD_CSRF_TOKEN", status: 403 });
+		expect(reached).toBe(false);
+		// Nothing is answered in place: the handler does it, inside the chain.
+		expect(back).not.toHaveBeenCalled();
+		expect(json).not.toHaveBeenCalled();
+		expect(status).not.toHaveBeenCalled();
+	});
+
 	it("redirects a browser back and re-flashes the form", async () => {
 		const { ctx, session, back, json } = makeContext("text/html");
 
-		await blackholeMiddleware(ctx, async () => {});
+		await hosted(ctx, async () => {});
 
 		expect(session.flashExcept).toHaveBeenCalledWith([
 			"_csrf",
@@ -88,7 +112,7 @@ describe("blackhole > CSRF rejection (AdonisJS Shield parity)", () => {
 	it("still answers a JSON client with the error body", async () => {
 		const { ctx, back, json, status } = makeContext("application/json");
 
-		await blackholeMiddleware(ctx, async () => {});
+		await hosted(ctx, async () => {});
 
 		expect(back).not.toHaveBeenCalled();
 		expect(status).toHaveBeenCalledWith(403);
@@ -104,7 +128,7 @@ describe("blackhole > CSRF rejection (AdonisJS Shield parity)", () => {
 		// blackhole is agnostic: a host without a session must not crash here.
 		const { ctx, back, json } = makeContext("text/html", false);
 
-		await blackholeMiddleware(ctx, async () => {});
+		await hosted(ctx, async () => {});
 
 		expect(back).not.toHaveBeenCalled();
 		expect(json).toHaveBeenCalled();

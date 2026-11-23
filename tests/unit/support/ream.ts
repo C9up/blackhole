@@ -165,13 +165,44 @@ export function reamContext(options: ReamOptions): {
 	return { ctx, spy };
 }
 
-/** Run the router-tier middleware, recording whether the route ran. */
+type Middleware<C> = (
+	ctx: C,
+	next: () => Promise<void> | void,
+) => Promise<void>;
+
+/**
+ * The middleware as the host runs it: an error thrown in the chain reaches the
+ * exception handler, which lets an error that renders itself — one with a
+ * `handle(error, ctx)`, such as `E_BAD_CSRF_TOKEN` — answer on the same
+ * context. Any other error is left to propagate.
+ */
+export function withExceptionHandler<C>(
+	middleware: Middleware<C>,
+): Middleware<C> {
+	return async (ctx, next) => {
+		try {
+			await middleware(ctx, next);
+		} catch (error) {
+			const handle: unknown =
+				typeof error === "object" && error !== null
+					? Reflect.get(error, "handle")
+					: undefined;
+			if (typeof handle !== "function") throw error;
+			await Reflect.apply(handle, error, [error, ctx]);
+		}
+	};
+}
+
+/**
+ * Run the router-tier middleware as the host does (through its exception
+ * handler), recording whether the route ran.
+ */
 export async function runRoute(
-	middleware: (ctx: ReamContext, next: () => Promise<void>) => Promise<void>,
+	middleware: Middleware<ReamContext>,
 	built: { ctx: ReamContext; spy: ReamSpy },
 	handler: (ctx: ReamContext) => void = () => {},
 ): Promise<ReamSpy> {
-	await middleware(built.ctx, async () => {
+	await withExceptionHandler(middleware)(built.ctx, async () => {
 		built.spy.nextCalled = true;
 		handler(built.ctx);
 	});

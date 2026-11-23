@@ -13,8 +13,12 @@ import { describe, expect, it } from "vitest";
 import { BLACKHOLE_KEY } from "../../src/BlackholeProvider.js";
 import { createBlackhole } from "../../src/index.js";
 import { blackholeMiddleware, type ReamContext } from "../../src/middleware.js";
+import { withExceptionHandler } from "./support/ream.js";
 
 const SECRET = "test-app-key-32-bytes-long-aaaaaa";
+
+/** The middleware run as the host runs it: through its exception handler. */
+const hosted = withExceptionHandler(blackholeMiddleware);
 const bh = createBlackhole({ csrf: true, secret: SECRET });
 
 /** Minimal Ream-shaped context: only what the CSRF path reads. */
@@ -89,7 +93,7 @@ describe("blackhole > Ream middleware > _csrf form field", () => {
 		const { ctx, statusOf } = contextFor({ _csrf: other }, token);
 
 		let reached = false;
-		await blackholeMiddleware(ctx, () => {
+		await hosted(ctx, () => {
 			reached = true;
 		});
 

@@ -8,8 +8,7 @@ import {
 	CspKeywords,
 	createBlackhole,
 	cspKeywords,
-	E_BLACKHOLE_INVALID_CSP_KEYWORD_VALUE,
-	E_BLACKHOLE_UNKNOWN_CSP_KEYWORD,
+	errors,
 } from "../../src/index.js";
 import { blackholeMiddleware } from "../../src/middleware.js";
 import { ADAPTERS, viaAdapter } from "./support/adapters.js";
@@ -25,7 +24,7 @@ describe("blackhole > CSP keyword registry", () => {
 			build({ csp: { directives: { scriptSrc: ["'self'", "@viteDevUrl"] } } }),
 			build({ csp: { policy: "default-src 'self'; script-src @viteDevUrl" } }),
 		]) {
-			expect(make).toThrow(E_BLACKHOLE_UNKNOWN_CSP_KEYWORD);
+			expect(make).toThrow(errors.E_BLACKHOLE_UNKNOWN_CSP_KEYWORD);
 			expect(make).toThrow(/@viteDevUrl/);
 		}
 	});
@@ -92,17 +91,17 @@ describe("blackhole > CSP keyword registry", () => {
 			csp: { policy: "default-src 'self' @evil" },
 		});
 		expect(() => bh.securityHeaders()).toThrow(
-			E_BLACKHOLE_INVALID_CSP_KEYWORD_VALUE,
+			errors.E_BLACKHOLE_INVALID_CSP_KEYWORD_VALUE,
 		);
 	});
 
 	it("refuses a keyword registered under an invalid name", () => {
 		const registry = new CspKeywords();
 		expect(() => registry.register("vite", () => "")).toThrow(
-			E_BLACKHOLE_UNKNOWN_CSP_KEYWORD,
+			errors.E_BLACKHOLE_UNKNOWN_CSP_KEYWORD,
 		);
 		expect(() => registry.register("@a b", () => "")).toThrow(
-			E_BLACKHOLE_UNKNOWN_CSP_KEYWORD,
+			errors.E_BLACKHOLE_UNKNOWN_CSP_KEYWORD,
 		);
 		expect(registry.register("@ok-name_2", () => "").has("@ok-name_2")).toBe(
 			true,

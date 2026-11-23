@@ -25,6 +25,21 @@ import {
 	resolveCspKeywords,
 } from "./cspKeywords.js";
 import { durationToSeconds } from "./duration.js";
+import {
+	E_BLACKHOLE_EMPTY_RATE_LIMIT_KEY,
+	E_BLACKHOLE_INVALID_CORS,
+	E_BLACKHOLE_INVALID_CSP,
+	E_BLACKHOLE_INVALID_HEADER_VALUE,
+	E_BLACKHOLE_INVALID_RATE_LIMIT,
+	E_BLACKHOLE_INVALID_SECRET,
+	E_BLACKHOLE_INVALID_XFRAME,
+	E_BLACKHOLE_NAPI_REQUIRED,
+	E_BLACKHOLE_RATE_LIMIT_STORE_MISSING,
+	E_BLACKHOLE_REMOVED_OPTION,
+	E_BLACKHOLE_SECRET_MISSING,
+	E_BLACKHOLE_UNKNOWN_OPTION,
+	E_BLACKHOLE_WEAK_SECRET,
+} from "./errors.js";
 import { hasFunctions, loadNativeBinary } from "./vendor/nativeBinary.js";
 import { inProduction } from "./vendor/nodeEnv.js";
 
@@ -255,26 +270,26 @@ function dashify(name: string): string {
  */
 function assertCspSource(directive: string, source: string): void {
 	if (/[;,\r\n]/.test(source)) {
-		throw new Error(
-			`[blackhole] Content-Security-Policy: invalid value for ${JSON.stringify(directive)}: ${JSON.stringify(source)}.`,
-		);
+		throw new E_BLACKHOLE_INVALID_CSP([
+			`Content-Security-Policy: invalid value for ${JSON.stringify(directive)}: ${JSON.stringify(source)}.`,
+		]);
 	}
 	if (
 		CSP_QUOTED_KEYWORDS.has(source.toLowerCase()) ||
 		/^(?:nonce|sha256|sha384|sha512)-/i.test(source)
 	) {
-		throw new Error(
-			`[blackhole] Content-Security-Policy: ${JSON.stringify(source)} in ${JSON.stringify(directive)} must be single-quoted ('${source}'). Unquoted, the browser reads it as a host name and the directive silently stops meaning what it says.`,
-		);
+		throw new E_BLACKHOLE_INVALID_CSP([
+			`Content-Security-Policy: ${JSON.stringify(source)} in ${JSON.stringify(directive)} must be single-quoted ('${source}'). Unquoted, the browser reads it as a host name and the directive silently stops meaning what it says.`,
+		]);
 	}
 }
 
 /** Refuse a directive name that is not one. */
 function assertCspDirectiveName(name: string): void {
 	if (name.length === 0 || /[^a-zA-Z0-9-]/.test(name)) {
-		throw new Error(
-			`[blackhole] Content-Security-Policy: invalid directive name ${JSON.stringify(name)}.`,
-		);
+		throw new E_BLACKHOLE_INVALID_CSP([
+			`Content-Security-Policy: invalid directive name ${JSON.stringify(name)}.`,
+		]);
 	}
 }
 
@@ -294,33 +309,33 @@ function resolveCspDirectives(config: CspConfig): Map<string, string[]> {
 		assertCspDirectiveName(rawName);
 		const name = dashify(rawName);
 		if (own.has(name) || disabled.has(name)) {
-			throw new Error(
-				`[blackhole] Content-Security-Policy: directive ${JSON.stringify(name)} is given twice.`,
-			);
+			throw new E_BLACKHOLE_INVALID_CSP([
+				`Content-Security-Policy: directive ${JSON.stringify(name)} is given twice.`,
+			]);
 		}
 		if (rawValue === null) {
 			if (name === "default-src") {
-				throw new Error(
-					"[blackhole] Content-Security-Policy: `default-src` cannot be `null` — every fetch directive you did not set falls back to it. To remove it anyway, set it to `dangerouslyDisableDefaultSrc`.",
-				);
+				throw new E_BLACKHOLE_INVALID_CSP([
+					"Content-Security-Policy: `default-src` cannot be `null` — every fetch directive you did not set falls back to it. To remove it anyway, set it to `dangerouslyDisableDefaultSrc`.",
+				]);
 			}
 			disabled.add(name);
 			continue;
 		}
 		if (rawValue === dangerouslyDisableDefaultSrc) {
 			if (name !== "default-src") {
-				throw new Error(
-					`[blackhole] Content-Security-Policy: \`dangerouslyDisableDefaultSrc\` only applies to \`default-src\`; to drop ${JSON.stringify(name)}, set it to \`null\`.`,
-				);
+				throw new E_BLACKHOLE_INVALID_CSP([
+					`Content-Security-Policy: \`dangerouslyDisableDefaultSrc\` only applies to \`default-src\`; to drop ${JSON.stringify(name)}, set it to \`null\`.`,
+				]);
 			}
 			disabled.add(name);
 			continue;
 		}
 		const sources = typeof rawValue === "string" ? [rawValue] : rawValue;
 		if (!Array.isArray(sources)) {
-			throw new Error(
-				`[blackhole] Content-Security-Policy: invalid value for ${JSON.stringify(name)}.`,
-			);
+			throw new E_BLACKHOLE_INVALID_CSP([
+				`Content-Security-Policy: invalid value for ${JSON.stringify(name)}.`,
+			]);
 		}
 		for (const source of sources) assertCspSource(name, source);
 		own.set(name, sources);
@@ -339,14 +354,14 @@ function resolveCspDirectives(config: CspConfig): Map<string, string[]> {
 	}
 
 	if (merged.size === 0) {
-		throw new Error(
-			"[blackhole] Content-Security-Policy has no directives. Set some, or turn the header off with `csp: false`.",
-		);
+		throw new E_BLACKHOLE_INVALID_CSP([
+			"Content-Security-Policy has no directives. Set some, or turn the header off with `csp: false`.",
+		]);
 	}
 	if (!merged.has("default-src") && !disabled.has("default-src")) {
-		throw new Error(
-			"[blackhole] Content-Security-Policy needs a `default-src`. To go without one anyway, set it to `dangerouslyDisableDefaultSrc`.",
-		);
+		throw new E_BLACKHOLE_INVALID_CSP([
+			"Content-Security-Policy needs a `default-src`. To go without one anyway, set it to `dangerouslyDisableDefaultSrc`.",
+		]);
 	}
 	return merged;
 }
@@ -359,9 +374,9 @@ function resolveCspDirectives(config: CspConfig): Map<string, string[]> {
  */
 function assertCspString(csp: string): void {
 	if (/[\r\n]/.test(csp)) {
-		throw new Error(
-			"[blackhole] Content-Security-Policy: the policy string contains a line break.",
-		);
+		throw new E_BLACKHOLE_INVALID_CSP([
+			"Content-Security-Policy: the policy string contains a line break.",
+		]);
 	}
 	const seen = new Set<string>();
 	for (const directive of csp.split(";")) {
@@ -370,9 +385,9 @@ function assertCspString(csp: string): void {
 		assertCspDirectiveName(name);
 		const lowered = name.toLowerCase();
 		if (seen.has(lowered)) {
-			throw new Error(
-				`[blackhole] Content-Security-Policy: directive ${JSON.stringify(lowered)} is given twice; the browser ignores the second.`,
-			);
+			throw new E_BLACKHOLE_INVALID_CSP([
+				`Content-Security-Policy: directive ${JSON.stringify(lowered)} is given twice; the browser ignores the second.`,
+			]);
 		}
 		seen.add(lowered);
 		for (const source of sources) {
@@ -445,9 +460,7 @@ const RETIRED_OPTIONS: Record<string, string> = {
 export function assertNoRetiredOptions(options: object): void {
 	for (const [key, replacement] of Object.entries(RETIRED_OPTIONS)) {
 		if (Object.hasOwn(options, key)) {
-			throw new Error(
-				`[blackhole] \`${key}\` is no longer an option: ${replacement}.`,
-			);
+			throw new E_BLACKHOLE_REMOVED_OPTION([key, replacement]);
 		}
 	}
 }
@@ -460,9 +473,9 @@ function assertHeaderKeys(
 	const known = SECURITY_HEADER_KEYS[name];
 	for (const key of Object.keys(value)) {
 		if (!known.includes(key)) {
-			throw new Error(
+			throw new E_BLACKHOLE_UNKNOWN_OPTION([
 				`[blackhole] \`${name}\` has no option "${key}". Known: ${known.join(", ")}.`,
-			);
+			]);
 		}
 	}
 }
@@ -476,9 +489,7 @@ function assertHeaderKeys(
  */
 function assertHeaderValue(option: string, value: string): string {
 	if (value.length === 0 || /[^\t\x20-\x7e]/.test(value)) {
-		throw new Error(
-			`[blackhole] ${option}: ${JSON.stringify(value)} cannot be written as a header value (empty, or a control or non-ASCII character).`,
-		);
+		throw new E_BLACKHOLE_INVALID_HEADER_VALUE([option, JSON.stringify(value)]);
 	}
 	return value;
 }
@@ -510,12 +521,12 @@ function computeSecurityHeaders(
 	if (isOn(xFrame)) {
 		const action = xFrame?.action ?? "SAMEORIGIN";
 		if (!["DENY", "SAMEORIGIN", "ALLOW-FROM"].includes(action)) {
-			throw new Error(
-				`[blackhole] xFrame.action must be DENY, SAMEORIGIN or ALLOW-FROM, got ${JSON.stringify(action)}.`,
-			);
+			throw new E_BLACKHOLE_INVALID_XFRAME([
+				`must be DENY, SAMEORIGIN or ALLOW-FROM, got ${JSON.stringify(action)}.`,
+			]);
 		}
 		if (action === "ALLOW-FROM" && !xFrame?.domain) {
-			throw new Error("[blackhole] xFrame.action ALLOW-FROM needs a `domain`.");
+			throw new E_BLACKHOLE_INVALID_XFRAME(["ALLOW-FROM needs a `domain`."]);
 		}
 		headers["x-frame-options"] =
 			action === "ALLOW-FROM" && xFrame?.domain !== undefined
@@ -542,9 +553,9 @@ function computeSecurityHeaders(
 
 	if (isOn(csp)) {
 		if (csp?.policy !== undefined && csp.directives !== undefined) {
-			throw new Error(
-				"[blackhole] csp takes `directives` or `policy`, not both.",
-			);
+			throw new E_BLACKHOLE_INVALID_CSP([
+				"csp takes `directives` or `policy`, not both.",
+			]);
 		}
 		const value =
 			csp?.policy ??
@@ -667,22 +678,22 @@ const CORS_KEYS = new Set([
 function validateCors(cfg: CorsConfig): void {
 	for (const key of Object.keys(cfg)) {
 		if (!CORS_KEYS.has(key)) {
-			throw new Error(
+			throw new E_BLACKHOLE_UNKNOWN_OPTION([
 				`CORS misconfiguration: unknown option "${key}". Known options: ${[...CORS_KEYS].join(", ")}.`,
-			);
+			]);
 		}
 	}
 	if (cfg.credentials === true && (cfg.origin === "*" || cfg.origin === true)) {
-		throw new Error(
-			'CORS misconfiguration: origin="*" (or true) cannot be combined with credentials=true. Pin to an explicit origin list.',
-		);
+		throw new E_BLACKHOLE_INVALID_CORS([
+			'origin="*" (or true) cannot be combined with credentials=true. Pin to an explicit origin list.',
+		]);
 	}
 	if (Array.isArray(cfg.origin)) {
 		for (const entry of cfg.origin) {
 			if (typeof entry !== "string" || entry.length === 0) {
-				throw new Error(
-					"CORS misconfiguration: origin array must contain only non-empty strings.",
-				);
+				throw new E_BLACKHOLE_INVALID_CORS([
+					"origin array must contain only non-empty strings.",
+				]);
 			}
 		}
 	}
@@ -1210,24 +1221,24 @@ function assertRateLimit(rateLimit: {
 	];
 	for (const [field, value] of fields) {
 		if (!Number.isSafeInteger(value) || value <= 0 || value > 0xffffffff) {
-			throw new Error(
-				`[blackhole] rateLimit.${field} must be a positive whole number, got ${String(value)}.`,
-			);
+			throw new E_BLACKHOLE_INVALID_RATE_LIMIT([
+				`rateLimit.${field} must be a positive whole number, got ${String(value)}.`,
+			]);
 		}
 	}
 }
 
 function assertUsableSecret(secret: string): void {
 	if (PUBLICLY_KNOWN_SECRETS.has(secret.trim().toLowerCase())) {
-		throw new Error(
-			"[blackhole] the CSRF `secret` is a placeholder from the scaffolding, which everyone can read — " +
+		throw new E_BLACKHOLE_WEAK_SECRET([
+			"is a placeholder from the scaffolding, which everyone can read — " +
 				"anyone holding it can forge a valid CSRF token. Generate a real one with `ream generate:key`.",
-		);
+		]);
 	}
 	if (secret.length < 16) {
-		throw new Error(
-			`[blackhole] the CSRF \`secret\` is ${secret.length} characters, too short to sign with. Use at least 16 (a 32-byte random key is the norm).`,
-		);
+		throw new E_BLACKHOLE_WEAK_SECRET([
+			`is ${secret.length} characters, too short to sign with. Use at least 16 (a 32-byte random key is the norm).`,
+		]);
 	}
 }
 
@@ -1245,9 +1256,7 @@ function releaseSecret(secret: unknown): string {
 			if (typeof released === "string") return released;
 		}
 	}
-	throw new TypeError(
-		"[blackhole] the CSRF `secret` must be a string or a Secret wrapping one",
-	);
+	throw new E_BLACKHOLE_INVALID_SECRET();
 }
 
 /**
@@ -1357,9 +1366,8 @@ export function pathContext(
  */
 export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 	if (!native) {
-		throw new Error(
-			"[BLACKHOLE_NAPI_REQUIRED] The Blackhole Rust engine is required but not loaded.\n" +
-				"  Fix: cd packages/blackhole && pnpm build:napi",
+		throw new E_BLACKHOLE_NAPI_REQUIRED(
+			undefined,
 			loadError !== undefined ? { cause: loadError } : undefined,
 		);
 	}
@@ -1376,11 +1384,7 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 	const secret =
 		options.secret === undefined ? undefined : releaseSecret(options.secret);
 	if (csrf.enabled && !secret) {
-		throw new Error(
-			"[blackhole] CSRF is enabled but no `secret` was provided. Pass your APP_KEY as " +
-				"`secret` so CSRF tokens are signed (signed double-submit). Disable with " +
-				"`csrf: false` only if you have an alternative CSRF defense.",
-		);
+		throw new E_BLACKHOLE_SECRET_MISSING();
 	}
 	if (csrf.enabled && secret) {
 		assertUsableSecret(secret);
@@ -1427,7 +1431,7 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 	return {
 		check(req) {
 			const headersJson = JSON.stringify(req.headers);
-			return filter.check(
+			const result = filter.check(
 				req.method,
 				req.path,
 				req.query ?? "",
@@ -1439,6 +1443,7 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 				req.host,
 				req.csrfBinding,
 			);
+			return result;
 		},
 		generateCsrfToken(binding) {
 			return filter.generateCsrfToken(binding);
@@ -1513,14 +1518,10 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		},
 		async checkRateLimit(key) {
 			if (rateLimit?.store === undefined) {
-				throw new Error(
-					"[blackhole] checkRateLimit called without a configured rateLimit.store.",
-				);
+				throw new E_BLACKHOLE_RATE_LIMIT_STORE_MISSING();
 			}
 			if (key === "") {
-				throw new Error(
-					"[blackhole] checkRateLimit was given an empty key: every request without one would be counted in a single shared bucket.",
-				);
+				throw new E_BLACKHOLE_EMPTY_RATE_LIMIT_KEY();
 			}
 			const { count, resetSeconds } = await rateLimit.store.increment(
 				key,
@@ -1544,13 +1545,7 @@ export {
 	CspKeywords,
 	cspKeywords,
 } from "./cspKeywords.js";
-export {
-	E_BLACKHOLE_DATABASE_UNAVAILABLE,
-	E_BLACKHOLE_INVALID_CSP_KEYWORD_VALUE,
-	E_BLACKHOLE_SESSION_NOT_READY,
-	E_BLACKHOLE_UNKNOWN_CSP_KEYWORD,
-	E_BLACKHOLE_UNSUPPORTED_DATABASE,
-} from "./errors.js";
+export * as errors from "./errors.js";
 export {
 	DatabaseLimiterStore,
 	defineThrottle,
@@ -1574,7 +1569,6 @@ export {
 	type MultiLimiterOptions,
 	RedisLimiterStore,
 	type ThrottleContext,
-	ThrottleException,
 	type ThrottleMiddleware,
 } from "./limiter.js";
 export { quasarConnection } from "./quasar.js";

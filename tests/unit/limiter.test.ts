@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import BlackholeProvider, {
 	BLACKHOLE_LIMITER_KEY,
 } from "../../src/BlackholeProvider.js";
+import { ThrottleException } from "../../src/errors.js";
 import {
 	Limiter,
 	type LimiterHttpContext,
@@ -14,7 +15,6 @@ import {
 	limiterStores,
 	MemoryLimiterStore,
 	RedisLimiterStore,
-	ThrottleException,
 } from "../../src/limiter.js";
 import limiter, {
 	clearLimiter,
@@ -153,9 +153,15 @@ describe("blackhole > Limiter", () => {
 	});
 
 	it("refuses a budget that would not limit", () => {
-		expect(() => memoryLimiter({ requests: 0, duration: 60 })).toThrow();
-		expect(() => memoryLimiter({ requests: 1, duration: 0 })).toThrow();
-		expect(() => memoryLimiter({ requests: 1, duration: "soon" })).toThrow();
+		expect(() => memoryLimiter({ requests: 0, duration: 60 })).toThrow(
+			expect.objectContaining({ code: "E_BLACKHOLE_INVALID_RATE_LIMIT" }),
+		);
+		expect(() => memoryLimiter({ requests: 1, duration: 0 })).toThrow(
+			expect.objectContaining({ code: "E_BLACKHOLE_INVALID_RATE_LIMIT" }),
+		);
+		expect(() => memoryLimiter({ requests: 1, duration: "soon" })).toThrow(
+			expect.objectContaining({ code: "E_BLACKHOLE_INVALID_DURATION" }),
+		);
 	});
 });
 
@@ -288,9 +294,12 @@ describe("blackhole > limiter.define (throttle middleware)", () => {
 
 	it("refuses a limit without requests or a window", async () => {
 		const throttle = manager.define("broken", () => manager.allowRequests(5));
-		await expect(throttle(httpContext().ctx, async () => {})).rejects.toThrow(
-			/every\(\)/,
-		);
+		await expect(
+			throttle(httpContext().ctx, async () => {}),
+		).rejects.toMatchObject({
+			code: "E_BLACKHOLE_INCOMPLETE_THROTTLE",
+			message: expect.stringMatching(/every\(\)/),
+		});
 	});
 
 	it("names the middleware after the limit", () => {
@@ -351,7 +360,10 @@ describe("blackhole > limiter service and provider", () => {
 
 	it("refuses a default store that is not declared", () => {
 		expect(() => new LimiterManager({ default: "redis", stores: {} })).toThrow(
-			/not in `stores`/,
+			expect.objectContaining({
+				code: "E_BLACKHOLE_UNKNOWN_STORE",
+				message: expect.stringMatching(/not in `stores`/),
+			}),
 		);
 	});
 });

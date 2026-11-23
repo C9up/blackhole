@@ -7,14 +7,16 @@
  */
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { E_BLACKHOLE_UNSUPPORTED_DATABASE } from "../../src/errors.js";
+import {
+	E_BLACKHOLE_UNSUPPORTED_DATABASE,
+	ThrottleException,
+} from "../../src/errors.js";
 import {
 	DatabaseLimiterStore,
 	type LimiterDatabase,
 	LimiterManager,
 	limiterStores,
 	MultiLimiter,
-	ThrottleException,
 } from "../../src/limiter.js";
 import limiter, {
 	clearLimiter,
@@ -154,10 +156,20 @@ describe("blackhole > limiter.multi()", () => {
 		});
 		const multi = m.multi("other", [{ key: "k", requests: 1, duration: 1 }]);
 		expect(multi.list()[0]?.limiter.name).toBe("memory");
-		expect(() => m.multi([])).toThrow(/one or more limiters/);
+		expect(() => m.multi([])).toThrow(
+			expect.objectContaining({
+				code: "E_BLACKHOLE_LIMITER_OPTIONS_MISSING",
+				message: expect.stringMatching(/one or more limiters/),
+			}),
+		);
 		expect(() =>
 			m.multi("nope", [{ key: "k", requests: 1, duration: 1 }]),
-		).toThrow(/unknown limiter store "nope"/);
+		).toThrow(
+			expect.objectContaining({
+				code: "E_BLACKHOLE_UNKNOWN_STORE",
+				message: expect.stringMatching(/unknown limiter store "nope"/),
+			}),
+		);
 	});
 
 	it("is on the limiter service too", async () => {
@@ -363,7 +375,12 @@ describe("blackhole > the database limiter store's dialects", () => {
 	it("refuses a table name that is not one, when the config is read", () => {
 		expect(() =>
 			limiterStores.database({ tableName: "rate_limits; DROP TABLE x" }),
-		).toThrow(/not a table name/);
+		).toThrow(
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_TABLE_NAME",
+				message: expect.stringMatching(/not a table name/),
+			}),
+		);
 	});
 });
 

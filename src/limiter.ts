@@ -31,7 +31,16 @@ import { clientKey } from "./clientKey.js";
 import { durationToSeconds } from "./duration.js";
 import {
 	E_BLACKHOLE_DATABASE_UNAVAILABLE,
+	E_BLACKHOLE_INCOMPLETE_CONNECTION,
+	E_BLACKHOLE_INCOMPLETE_THROTTLE,
+	E_BLACKHOLE_INVALID_RATE_LIMIT,
+	E_BLACKHOLE_INVALID_TABLE_NAME,
+	E_BLACKHOLE_LIMITER_OPTIONS_MISSING,
+	E_BLACKHOLE_QUASAR_MISSING,
+	E_BLACKHOLE_UNKNOWN_STORE,
 	E_BLACKHOLE_UNSUPPORTED_DATABASE,
+	E_TOO_MANY_REQUESTS,
+	type ThrottleException,
 } from "./errors.js";
 import {
 	hasCommands,
@@ -83,114 +92,18 @@ export class LimiterResponse {
 export interface ThrottleContext {
 	request: {
 		header(name: string): string | undefined;
+		/**
+		 * Content negotiation (ream's `request.accepts`): the first of `types`
+		 * the client accepts, or `null`. The 429 is shaped by it when the host
+		 * has it, by the `Accept` header read directly otherwise.
+		 */
+		accepts?<T extends string>(types: T[]): T | null;
 	};
 	response: {
 		header(name: string, value: string): unknown;
 		status(code: number): unknown;
 		send(body: unknown): unknown;
 	};
-}
-
-/**
- * A key over its budget. Thrown by `consume` and by a throttle middleware;
- * the HTTP layer renders it as a 429 through {@link ThrottleException.handle}.
- */
-export class ThrottleException extends Error {
-	readonly code = "E_TOO_MANY_REQUESTS";
-	/** The translation key of the message (`ctx.i18n.t`). */
-	readonly identifier = "errors.E_TOO_MANY_REQUESTS";
-	status = 429;
-	readonly response: LimiterResponse;
-	/** Replaces the default `X-RateLimit-*` / `Retry-After` headers when set. */
-	headers?: Record<string, string | number>;
-	translation?: { identifier: string; data?: Record<string, unknown> };
-
-	constructor(response: LimiterResponse, options?: ErrorOptions) {
-		super("Too many requests", options);
-		this.name = "ThrottleException";
-		this.response = response;
-	}
-
-	/** The rate-limit headers a 429 carries by default. */
-	getDefaultHeaders(): Record<string, string | number> {
-		return {
-			"X-RateLimit-Limit": this.response.limit,
-			"X-RateLimit-Remaining": this.response.remaining,
-			"Retry-After": this.response.availableIn,
-			"X-RateLimit-Reset": new Date(
-				Date.now() + this.response.availableIn * 1000,
-			).toISOString(),
-		};
-	}
-
-	/** The message, translated through `ctx.i18n` when the request has one. */
-	getResponseMessage(ctx: object): string {
-		const i18n: unknown = Reflect.get(ctx, "i18n");
-		const t: unknown =
-			typeof i18n === "object" && i18n !== null
-				? Reflect.get(i18n, "t")
-				: undefined;
-		if (typeof t !== "function") return this.message;
-		const translated: unknown = Reflect.apply(t, i18n, [
-			this.translation?.identifier ?? this.identifier,
-			this.translation?.data ?? {},
-			this.message,
-		]);
-		return typeof translated === "string" ? translated : this.message;
-	}
-
-	setMessage(message: string): this {
-		this.message = message;
-		return this;
-	}
-
-	setStatus(status: number): this {
-		this.status = status;
-		return this;
-	}
-
-	setHeaders(headers: Record<string, string | number>): this {
-		this.headers = headers;
-		return this;
-	}
-
-	/** Translate the message under `identifier` instead of the default one. */
-	t(identifier: string, data?: Record<string, unknown>): this {
-		this.translation = { identifier, data };
-		return this;
-	}
-
-	/**
-	 * Render the 429: the headers, then a body shaped for what the client
-	 * accepts — the message as text for a browser, `{ errors: [...] }` for
-	 * JSON, the JSON:API error object for `application/vnd.api+json`.
-	 */
-	async handle(error: ThrottleException, ctx: ThrottleContext): Promise<void> {
-		const message = error.getResponseMessage(ctx);
-		const headers = error.headers ?? error.getDefaultHeaders();
-		for (const [name, value] of Object.entries(headers)) {
-			ctx.response.header(name, String(value));
-		}
-		ctx.response.status(error.status);
-		const accept = ctx.request.header("accept") ?? "";
-		if (accept.includes("application/vnd.api+json")) {
-			ctx.response.send({
-				errors: [
-					{
-						code: error.code,
-						title: message,
-						meta: { retryAfter: error.response.availableIn },
-					},
-				],
-			});
-		} else if (accept.includes("json") && !accept.includes("text/html")) {
-			ctx.response.send({
-				errors: [{ message, retryAfter: error.response.availableIn }],
-			});
-		} else {
-			ctx.response.send(message);
-		}
-	}
 }
 
 // ── Stores ───────────────────────────────────────────────────────────────
@@ -511,8 +424,10 @@ async function atlasDatabase(
 		loaded = await import(/* @vite-ignore */ specifier);
 	} catch (cause) {
 		throw new E_BLACKHOLE_DATABASE_UNAVAILABLE(
-			`the database limiter store asks for atlas' ${which}, but @c9up/atlas is not installed. Install it, or pass a client: \`limiterStores.database({ connection: db })\``,
-			cause,
+			[
+				`the database limiter store asks for atlas' ${which}, but @c9up/atlas is not installed. Install it, or pass a client: \`limiterStores.database({ connection: db })\``,
+			],
+			{ cause },
 		);
 	}
 	let scoped: unknown;
@@ -527,13 +442,15 @@ async function atlasDatabase(
 		if (isLimiterDatabase(scoped)) return scoped;
 	} catch (cause) {
 		throw new E_BLACKHOLE_DATABASE_UNAVAILABLE(
-			`atlas' ${which} is not available to the database limiter store: its provider has not booted, or the connection is not configured`,
-			cause,
+			[
+				`atlas' ${which} is not available to the database limiter store: its provider has not booted, or the connection is not configured`,
+			],
+			{ cause },
 		);
 	}
-	throw new E_BLACKHOLE_DATABASE_UNAVAILABLE(
+	throw new E_BLACKHOLE_DATABASE_UNAVAILABLE([
 		`@c9up/atlas/services/db did not expose a client with \`dialect\` and \`rawQuery()\` for the ${which}`,
-	);
+	]);
 }
 
 /** A whole number out of a column, however the driver typed it. */
@@ -550,9 +467,7 @@ const TABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?$/;
 
 function assertTableName(table: string | undefined): void {
 	if (table !== undefined && !TABLE_NAME.test(table)) {
-		throw new Error(
-			`[blackhole] the database limiter store's tableName ${JSON.stringify(table)} is not a table name.`,
-		);
+		throw new E_BLACKHOLE_INVALID_TABLE_NAME([JSON.stringify(table)]);
 	}
 }
 
@@ -777,7 +692,10 @@ export const limiterStores = {
 							isConnection: isLimiterRedisClient,
 							what: "the limiter",
 							alternative: "or pass a client instead of a connection name",
-							raise: (_reason, message, cause) => new Error(message, { cause }),
+							raise: (reason, message, cause) =>
+								reason === "quasar-missing"
+									? new E_BLACKHOLE_QUASAR_MISSING([message], { cause })
+									: new E_BLACKHOLE_INCOMPLETE_CONNECTION([message], { cause }),
 						})
 				: connection;
 		return () => new RedisLimiterStore(source, { prefix: options.prefix });
@@ -836,15 +754,17 @@ export class Limiter {
 
 	constructor(store: LimiterStore, options: LimiterOptions) {
 		if (!Number.isSafeInteger(options.requests) || options.requests <= 0) {
-			throw new Error(
-				`[blackhole] limiter requests must be a positive whole number, got ${String(options.requests)}.`,
-			);
+			throw new E_BLACKHOLE_INVALID_RATE_LIMIT([
+				`limiter requests must be a positive whole number, got ${String(options.requests)}.`,
+			]);
 		}
 		this.#store = store;
 		this.requests = options.requests;
 		this.duration = durationToSeconds(options.duration, "a limiter duration");
 		if (this.duration <= 0) {
-			throw new Error("[blackhole] limiter duration must be longer than zero.");
+			throw new E_BLACKHOLE_INVALID_RATE_LIMIT([
+				"limiter duration must be longer than zero.",
+			]);
 		}
 		this.blockDuration =
 			options.blockDuration === undefined
@@ -884,7 +804,7 @@ export class Limiter {
 					this.blockDuration,
 				);
 			}
-			throw new ThrottleException(this.#response(record));
+			throw new E_TOO_MANY_REQUESTS(this.#response(record));
 		}
 		return this.#response(record);
 	}
@@ -977,7 +897,7 @@ export class Limiter {
 		try {
 			await this.consume(key, amount);
 		} catch (error) {
-			if (error instanceof ThrottleException) return undefined;
+			if (error instanceof E_TOO_MANY_REQUESTS) return undefined;
 			throw error;
 		}
 		return callback();
@@ -998,7 +918,7 @@ export class Limiter {
 	): Promise<[ThrottleException, null] | [null, T]> {
 		const response = await this.get(key);
 		if (response && response.remaining <= 0) {
-			return [new ThrottleException(response), null];
+			return [new E_TOO_MANY_REQUESTS(response), null];
 		}
 		let result: T;
 		try {
@@ -1104,7 +1024,7 @@ export class MultiLimiter {
 		try {
 			await this.consume();
 		} catch (error) {
-			if (error instanceof ThrottleException) return undefined;
+			if (error instanceof E_TOO_MANY_REQUESTS) return undefined;
 			throw error;
 		}
 		return callback();
@@ -1123,7 +1043,7 @@ export class MultiLimiter {
 		const exhausted = responses.find(
 			(response) => response !== null && response.remaining <= 0,
 		);
-		if (exhausted) return [new ThrottleException(exhausted), null];
+		if (exhausted) return [new E_TOO_MANY_REQUESTS(exhausted), null];
 		let result: T;
 		try {
 			result = await callback();
@@ -1233,9 +1153,7 @@ export class HttpLimiter {
 		ctx: LimiterHttpContext,
 	): Promise<LimiterResponse> {
 		if (this.#requests === undefined || this.#duration === undefined) {
-			throw new Error(
-				`[blackhole] cannot throttle "${prefix}": set allowRequests() and every() on its limiter.`,
-			);
+			throw new E_BLACKHOLE_INCOMPLETE_THROTTLE([prefix]);
 		}
 		const options: LimiterOptions = {
 			requests: this.#requests,
@@ -1250,14 +1168,14 @@ export class HttpLimiter {
 		const key = `${prefix}_${this.#key ?? `ip_${clientKey(ctx.request.ip())}`}`;
 		const current = await limiter.get(key);
 		if (current && current.consumed > current.limit) {
-			const error = new ThrottleException(current);
+			const error = new E_TOO_MANY_REQUESTS(current);
 			this.#exceptionModifier(error);
 			throw error;
 		}
 		try {
 			return await limiter.consume(key);
 		} catch (error) {
-			if (error instanceof ThrottleException) this.#exceptionModifier(error);
+			if (error instanceof E_TOO_MANY_REQUESTS) this.#exceptionModifier(error);
 			throw error;
 		}
 	}
@@ -1284,10 +1202,10 @@ export class LimiterManager {
 	constructor(config: LimiterConfig) {
 		if (!config.stores[config.default]) {
 			const known = Object.keys(config.stores);
-			throw new Error(
-				`[blackhole] the limiter's default store "${config.default}" is not in \`stores\`` +
+			throw new E_BLACKHOLE_UNKNOWN_STORE([
+				`the limiter's default store "${config.default}" is not in \`stores\`` +
 					(known.length > 0 ? ` (declared: ${known.join(", ")}).` : "."),
-			);
+			]);
 		}
 		this.config = config;
 	}
@@ -1303,13 +1221,15 @@ export class LimiterManager {
 			typeof storeOrOptions === "string" ? storeOrOptions : this.config.default;
 		const options = typeof storeOrOptions === "string" ? maybe : storeOrOptions;
 		if (options === undefined) {
-			throw new Error(
-				"[blackhole] limiter.use() needs the allowed requests and the duration.",
-			);
+			throw new E_BLACKHOLE_LIMITER_OPTIONS_MISSING([
+				"limiter.use() needs the allowed requests and the duration.",
+			]);
 		}
 		const factory = this.config.stores[store];
 		if (factory === undefined) {
-			throw new Error(`[blackhole] unknown limiter store "${store}".`);
+			throw new E_BLACKHOLE_UNKNOWN_STORE([
+				`unknown limiter store "${store}".`,
+			]);
 		}
 		const id = [
 			store,
@@ -1348,9 +1268,9 @@ export class LimiterManager {
 			typeof storeOrOptions === "string" ? storeOrOptions : this.config.default;
 		const options = typeof storeOrOptions === "string" ? maybe : storeOrOptions;
 		if (options === undefined || options.length === 0) {
-			throw new Error(
-				"[blackhole] limiter.multi() needs the options of one or more limiters.",
-			);
+			throw new E_BLACKHOLE_LIMITER_OPTIONS_MISSING([
+				"limiter.multi() needs the options of one or more limiters.",
+			]);
 		}
 		return new MultiLimiter(
 			options.map(({ key, ...budget }) => ({

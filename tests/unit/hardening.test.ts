@@ -9,8 +9,12 @@ import { blackholeExpress } from "../../src/express.js";
 import { type Blackhole, createBlackhole } from "../../src/index.js";
 import { blackholeMiddleware, type ReamContext } from "../../src/middleware.js";
 import { blackholeServerMiddleware } from "../../src/server_middleware.js";
+import { withExceptionHandler } from "./support/ream.js";
 
 const SECRET = "test-app-key-32-bytes-long-aaaaaa";
+
+/** The middleware run as the host runs it: through its exception handler. */
+const hosted = withExceptionHandler(blackholeMiddleware);
 
 describe("blackhole > a rate limit must limit", () => {
 	const invalid = [
@@ -25,12 +29,15 @@ describe("blackhole > a rate limit must limit", () => {
 	for (const rateLimit of invalid) {
 		it(`refuses ${JSON.stringify(rateLimit)}`, () => {
 			expect(() => createBlackhole({ csrf: false, rateLimit })).toThrow(
-				/must be a positive whole number/,
+				expect.objectContaining({
+					code: "E_BLACKHOLE_INVALID_RATE_LIMIT",
+					message: expect.stringMatching(/must be a positive whole number/),
+				}),
 			);
 		});
 	}
 
-	it("still limits a valid configuration, with the namespaced code", () => {
+	it("still limits a valid configuration, under the throttle's code", () => {
 		const bh = createBlackhole({
 			csrf: false,
 			rateLimit: { max: 1, windowSeconds: 60 },
@@ -45,8 +52,10 @@ describe("blackhole > a rate limit must limit", () => {
 		const refused = bh.check(req);
 		expect(refused.allowed).toBe(false);
 		expect(refused.status).toBe(429);
-		// The same code the distributed-store path answers with.
-		expect(refused.body).toContain("E_BLACKHOLE_RATE_LIMITED");
+		// The code a throttle raises, and the distributed-store path answers
+		// with: one failure, one code. The engine's own code never reaches out.
+		expect(refused.body).toContain("E_TOO_MANY_REQUESTS");
+		expect(refused.body).not.toContain("E_BLACKHOLE_RATE_LIMITED");
 	});
 });
 
@@ -156,7 +165,7 @@ function reamContext(opts: {
 describe("blackhole > Ream: refusals and errors carry the security headers", () => {
 	it("on a CSRF refusal", async () => {
 		const { ctx, headers, status } = reamContext({ method: "POST" });
-		await blackholeMiddleware(ctx, () => {
+		await hosted(ctx, () => {
 			throw new Error("next must not run");
 		});
 		expect(status()).toBe(403);

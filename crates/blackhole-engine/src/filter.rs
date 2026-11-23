@@ -196,7 +196,7 @@ impl BlackholeFilter {
                 ];
                 return Some(Response::json_with_headers(
                     429,
-                    r#"{"error":{"code":"E_BLACKHOLE_RATE_LIMITED","message":"Too many requests"}}"#,
+                    r#"{"error":{"code":"E_TOO_MANY_REQUESTS","message":"Too many requests"}}"#,
                     headers,
                 ));
             }

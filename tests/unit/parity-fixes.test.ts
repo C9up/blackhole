@@ -185,7 +185,10 @@ describe("#3 injectable distributed store", () => {
 			rateLimit: { max: 1, windowSeconds: 60 },
 		});
 		expect(bh.hasRateLimitStore()).toBe(false);
-		await expect(bh.checkRateLimit("k")).rejects.toThrow(/store/);
+		await expect(bh.checkRateLimit("k")).rejects.toMatchObject({
+			code: "E_BLACKHOLE_RATE_LIMIT_STORE_MISSING",
+			message: expect.stringMatching(/store/),
+		});
 	});
 });
 

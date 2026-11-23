@@ -136,7 +136,10 @@ describe("blackhole > CORS options", () => {
 
 	it("still refuses true or '*' with credentials", () => {
 		expect(() => corsOf({ origin: true, credentials: true }, "x")).toThrow(
-			/cannot be combined with credentials/,
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_CORS",
+				message: expect.stringMatching(/cannot be combined with credentials/),
+			}),
 		);
 	});
 
@@ -207,7 +210,10 @@ describe("blackhole > CORS options", () => {
 	it("refuses an unknown option instead of dropping it", () => {
 		const cors = { origin: true, exposeHeader: ["X-Total"] };
 		expect(() => createBlackhole({ csrf: false, cors })).toThrow(
-			/unknown option "exposeHeader"/,
+			expect.objectContaining({
+				code: "E_BLACKHOLE_UNKNOWN_OPTION",
+				message: expect.stringMatching(/unknown option "exposeHeader"/),
+			}),
 		);
 	});
 });

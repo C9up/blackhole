@@ -191,7 +191,12 @@ describe("blackhole > rate-limit stores", () => {
 						stores: { memory: stores.memory() },
 					},
 				}),
-			).toThrow(/not in `stores`.*Declared: memory/s);
+			).toThrow(
+				expect.objectContaining({
+					code: "E_BLACKHOLE_UNKNOWN_STORE",
+					message: expect.stringMatching(/not in `stores`.*Declared: memory/s),
+				}),
+			);
 		});
 
 		it("refuses `stores` with no `default`", () => {
@@ -204,7 +209,12 @@ describe("blackhole > rate-limit stores", () => {
 						stores: { memory: stores.memory() },
 					},
 				}),
-			).toThrow(/no `default`/);
+			).toThrow(
+				expect.objectContaining({
+					code: "E_BLACKHOLE_NO_DEFAULT_STORE",
+					message: expect.stringMatching(/no `default`/),
+				}),
+			);
 		});
 
 		it("still honours a store instance", () => {
@@ -245,7 +255,10 @@ describe("blackhole > a store never counts a request without a key", () => {
 
 	it("is refused by checkRateLimit itself", async () => {
 		const bh = createBlackhole(options);
-		await expect(bh.checkRateLimit("")).rejects.toThrow(/empty/);
+		await expect(bh.checkRateLimit("")).rejects.toMatchObject({
+			code: "E_BLACKHOLE_EMPTY_RATE_LIMIT_KEY",
+			message: expect.stringMatching(/empty/),
+		});
 	});
 
 	it("still counts a request that has one", async () => {

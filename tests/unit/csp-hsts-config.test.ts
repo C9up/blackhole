@@ -66,7 +66,12 @@ describe("blackhole > object-form CSP", () => {
 			cspOf({
 				directives: { scriptSrc: ["'self'"], "script-src": ["'none'"] },
 			}),
-		).toThrow(/given twice/);
+		).toThrow(
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_CSP",
+				message: expect.stringMatching(/given twice/),
+			}),
+		);
 	});
 
 	for (const keyword of [
@@ -83,7 +88,12 @@ describe("blackhole > object-form CSP", () => {
 		it(`refuses the unquoted ${keyword}`, () => {
 			expect(() =>
 				cspOf({ directives: { scriptSrc: ["'self'", keyword] } }),
-			).toThrow(/single-quoted/);
+			).toThrow(
+				expect.objectContaining({
+					code: "E_BLACKHOLE_INVALID_CSP",
+					message: expect.stringMatching(/single-quoted/),
+				}),
+			);
 		});
 	}
 
@@ -115,26 +125,45 @@ describe("blackhole > object-form CSP", () => {
 
 	it("refuses an invalid directive name", () => {
 		expect(() => cspOf({ directives: { "script src": ["'self'"] } })).toThrow(
-			/invalid directive name/,
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_CSP",
+				message: expect.stringMatching(/invalid directive name/),
+			}),
 		);
 	});
 
 	it("needs a default-src once the baseline is off", () => {
 		expect(() =>
 			cspOf({ useDefaults: false, directives: { scriptSrc: ["'self'"] } }),
-		).toThrow(/needs a `default-src`/);
+		).toThrow(
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_CSP",
+				message: expect.stringMatching(/needs a `default-src`/),
+			}),
+		);
 		expect(() => cspOf({ useDefaults: false, directives: {} })).toThrow(
-			/no directives/,
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_CSP",
+				message: expect.stringMatching(/no directives/),
+			}),
 		);
 	});
 
 	it("drops default-src only through the explicit marker", () => {
 		expect(() => cspOf({ directives: { defaultSrc: null } })).toThrow(
-			/cannot be `null`/,
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_CSP",
+				message: expect.stringMatching(/cannot be `null`/),
+			}),
 		);
 		expect(() =>
 			cspOf({ directives: { scriptSrc: dangerouslyDisableDefaultSrc } }),
-		).toThrow(/only applies to `default-src`/);
+		).toThrow(
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_CSP",
+				message: expect.stringMatching(/only applies to `default-src`/),
+			}),
+		);
 		const csp = cspOf({
 			directives: { defaultSrc: dangerouslyDisableDefaultSrc },
 		});
@@ -162,9 +191,17 @@ describe("blackhole > object-form CSP", () => {
 
 describe("blackhole > csp.policy (the string form)", () => {
 	it("refuses an unquoted keyword instead of warning", () => {
-		expect(() => cspOf("default-src self")).toThrow(/single-quoted/);
+		expect(() => cspOf("default-src self")).toThrow(
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_CSP",
+				message: expect.stringMatching(/single-quoted/),
+			}),
+		);
 		expect(() => cspOf("default-src 'self'; script-src nonce-x")).toThrow(
-			/single-quoted/,
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_CSP",
+				message: expect.stringMatching(/single-quoted/),
+			}),
 		);
 	});
 
@@ -174,14 +211,20 @@ describe("blackhole > csp.policy (the string form)", () => {
 			"default-src 'self';\nimg-src 'self'",
 		]) {
 			expect(() => createBlackhole({ csrf: false, csp: { policy } })).toThrow(
-				/line break/,
+				expect.objectContaining({
+					code: "E_BLACKHOLE_INVALID_CSP",
+					message: expect.stringMatching(/line break/),
+				}),
 			);
 		}
 	});
 
 	it("refuses a directive given twice", () => {
 		expect(() => cspOf("default-src 'self'; Default-Src 'none'")).toThrow(
-			/given twice/,
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_CSP",
+				message: expect.stringMatching(/given twice/),
+			}),
 		);
 	});
 
@@ -208,9 +251,24 @@ describe("blackhole > HSTS maxAge", () => {
 	});
 
 	it("refuses a negative or unreadable value", () => {
-		expect(() => hstsOf(-1)).toThrow(/HSTS maxAge/);
-		expect(() => hstsOf("soon")).toThrow(/HSTS maxAge/);
-		expect(() => hstsOf(Number.NaN)).toThrow(/HSTS maxAge/);
+		expect(() => hstsOf(-1)).toThrow(
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_DURATION",
+				message: expect.stringMatching(/HSTS maxAge/),
+			}),
+		);
+		expect(() => hstsOf("soon")).toThrow(
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_DURATION",
+				message: expect.stringMatching(/HSTS maxAge/),
+			}),
+		);
+		expect(() => hstsOf(Number.NaN)).toThrow(
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_DURATION",
+				message: expect.stringMatching(/HSTS maxAge/),
+			}),
+		);
 	});
 });
 
@@ -274,7 +332,10 @@ describe("blackhole > protective headers, one key each", () => {
 			})["x-frame-options"],
 		).toBe("ALLOW-FROM https://partner.example");
 		expect(() => headersOf({ xFrame: { action: "ALLOW-FROM" } })).toThrow(
-			/domain/,
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_XFRAME",
+				message: expect.stringMatching(/domain/),
+			}),
 		);
 	});
 
@@ -286,13 +347,21 @@ describe("blackhole > protective headers, one key each", () => {
 					directives: { defaultSrc: ["'self'"] },
 				},
 			}),
-		).toThrow(/not both/);
+		).toThrow(
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_CSP",
+				message: expect.stringMatching(/not both/),
+			}),
+		);
 	});
 
 	it("refuses an unknown key inside a header's object", () => {
 		const xFrame = { enabled: true, acton: "DENY" };
 		expect(() => headersOf({ xFrame })).toThrow(
-			/`xFrame` has no option "acton"/,
+			expect.objectContaining({
+				code: "E_BLACKHOLE_UNKNOWN_OPTION",
+				message: expect.stringMatching(/`xFrame` has no option "acton"/),
+			}),
 		);
 	});
 
@@ -300,6 +369,9 @@ describe("blackhole > protective headers, one key each", () => {
 		const options = { csrf: false, securityHeaders: { frameOptions: "DENY" } };
 		expect(() => createBlackhole(options)).toThrow(
 			/`securityHeaders` is no longer an option.*`xFrame`, `hsts`, `contentTypeSniffing`, `csp`, `referrerPolicy` and `permissionsPolicy`/,
+		);
+		expect(() => createBlackhole(options)).toThrow(
+			expect.objectContaining({ code: "E_BLACKHOLE_REMOVED_OPTION" }),
 		);
 	});
 });
@@ -310,7 +382,12 @@ describe("blackhole > free-text header values are refused at boot", () => {
 	it("refuses a line break in referrerPolicy.policy", () => {
 		expect(() =>
 			createBlackhole({ csrf: false, referrerPolicy: { policy: INJECTED } }),
-		).toThrow(/referrerPolicy\.policy/);
+		).toThrow(
+			expect.objectContaining({
+				code: "E_BLACKHOLE_INVALID_HEADER_VALUE",
+				message: expect.stringMatching(/referrerPolicy\.policy/),
+			}),
+		);
 	});
 
 	it("refuses a line break in permissionsPolicy.policy", () => {
@@ -338,7 +415,12 @@ describe("blackhole > free-text header values are refused at boot", () => {
 		for (const policy of ["no-referrer\u0000", "no-referrer\u007f", "nö", ""]) {
 			expect(() =>
 				createBlackhole({ csrf: false, referrerPolicy: { policy } }),
-			).toThrow(/referrerPolicy\.policy/);
+			).toThrow(
+				expect.objectContaining({
+					code: "E_BLACKHOLE_INVALID_HEADER_VALUE",
+					message: expect.stringMatching(/referrerPolicy\.policy/),
+				}),
+			);
 		}
 	});
 

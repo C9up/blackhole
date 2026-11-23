@@ -12,6 +12,7 @@
  * Duplicated rather than imported: blackhole depends on no other package of
  * the workspace.
  */
+import { E_BLACKHOLE_INVALID_DURATION } from "./errors.js";
 
 const DURATION_PATTERN =
 	/^(-?(?:\d+)?\.?\d+) *(m(?:illiseconds?|s(?:ecs?)?))?(s(?:ec(?:onds?|s)?)?)?(m(?:in(?:utes?|s)?)?)?(h(?:ours?|rs?)?)?(d(?:ays?)?)?(w(?:eeks?|ks?)?)?(y(?:ears?|rs?)?)?$/;
@@ -52,9 +53,7 @@ export function durationToSeconds(
 			? value
 			: (parseDurationMs(value) ?? Number.NaN) / SECOND;
 	if (!Number.isFinite(seconds) || seconds < 0) {
-		throw new Error(
-			`[blackhole] Cannot read ${JSON.stringify(value)} as ${label}: use a non-negative number of seconds, or a duration such as '30s', '1 minute' or '180 days'.`,
-		);
+		throw new E_BLACKHOLE_INVALID_DURATION([JSON.stringify(value), label]);
 	}
 	return Math.floor(seconds);
 }

@@ -17,6 +17,13 @@ import { reamContext, withExceptionHandler } from "./ream.js";
 
 export interface AdapterRequest {
 	method?: string;
+	/**
+	 * The method on the request line, when an override (`_method`, a header)
+	 * made the framework report another as `method`.
+	 */
+	wireMethod?: string;
+	/** The parsed body the framework hands its middlewares (not sent to Hono). */
+	body?: unknown;
 	/** Path and query, exactly as sent on the request line. */
 	target: string;
 	headers?: Record<string, string>;
@@ -61,6 +68,8 @@ async function viaReam(
 	const built = reamContext({
 		bh: createBlackhole(options),
 		method: req.method,
+		intended: req.wireMethod,
+		body: req.body,
 		path,
 		query,
 		headers: req.headers,
@@ -126,6 +135,8 @@ async function viaExpress(
 	await blackholeExpress(options)(
 		{
 			method: req.method ?? "GET",
+			originalMethod: req.wireMethod,
+			body: req.body,
 			url: req.target,
 			originalUrl: req.target,
 			path: splitTarget(req.target).path,
@@ -158,9 +169,10 @@ type FastifyHook = (
 interface FastifyRequestLike {
 	method: string;
 	url: string;
-	raw: { url: string };
+	raw: { url: string; method: string };
 	routeOptions?: { url?: string };
 	headers: Record<string, string>;
+	body?: unknown;
 	ip: string;
 	protocol: string;
 	host?: string;
@@ -207,7 +219,8 @@ async function viaFastify(
 	const request: FastifyRequestLike = {
 		method: req.method ?? "GET",
 		url: req.target,
-		raw: { url: req.target },
+		raw: { url: req.target, method: req.wireMethod ?? req.method ?? "GET" },
+		body: req.body,
 		routeOptions: req.routePattern ? { url: req.routePattern } : undefined,
 		headers: req.headers ?? {},
 		ip: "203.0.113.7",
@@ -264,8 +277,14 @@ async function viaHono(
 	const response = await app.request(
 		`http://localhost${req.target}`,
 		{ method: req.method ?? "GET", headers: req.headers ?? {} },
-		// What `@hono/node-server` hands the app: the raw request target.
-		{ incoming: { url: req.target } },
+		// What `@hono/node-server` hands the app: the raw request target, and
+		// the method on the request line.
+		{
+			incoming: {
+				url: req.target,
+				method: req.wireMethod ?? req.method ?? "GET",
+			},
+		},
 	);
 	const headers: Record<string, string> = {};
 	response.headers.forEach((value, name) => {

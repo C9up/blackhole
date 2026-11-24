@@ -9,6 +9,9 @@ hmac = "0.13"
 sha2 = "0.11"
 base64 = "0.23"
 ammonia = "4"
+# The parser ammonia runs, driven directly to bound its input (html_limits).
+# Keep it on the version ammonia resolves to.
+html5ever = "0.40"
 getrandom = "0.4"
 subtle = "2"
 urlencoding = "2"

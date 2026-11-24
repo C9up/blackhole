@@ -1,0 +1,24 @@
+# The licences a crate compiled into the shipped binaries may carry. Read by
+# scripts/third-party-notices.mjs through cargo-about: a crate under any other
+# licence, copyleft included, fails the generation. Permissive licences only.
+# For a crate offered under a choice, the first one listed here is taken.
+accepted = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+]
+# Test and build tooling is not compiled into the binaries.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# MPL-2.0 is file-level copyleft: the binary may carry these files under any
+# licence, as long as the notices say where their source is (they do).
+[cssparser]
+accepted = ["MPL-2.0"]
+
+[dtoa-short]
+accepted = ["MPL-2.0"]

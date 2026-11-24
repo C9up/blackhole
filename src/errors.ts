@@ -11,10 +11,13 @@
 import { createError, Exception, format } from "@c9up/flare";
 import type { LimiterResponse, ThrottleContext } from "./limiter.js";
 
-/** The Rust engine is not loaded. */
-export const E_BLACKHOLE_NAPI_REQUIRED = createError(
+/**
+ * The Rust engine is not loaded. The message names the platform package to
+ * install; the load error is its `cause`.
+ */
+export const E_BLACKHOLE_NAPI_REQUIRED = createError<[fix: string]>(
 	"[blackhole] The Blackhole Rust engine is required but not loaded.\n" +
-		"  Fix: cd packages/blackhole && pnpm build:napi",
+		"  Fix: %s",
 	"E_BLACKHOLE_NAPI_REQUIRED",
 );
 
@@ -154,6 +157,57 @@ export class E_BLACKHOLE_INVALID_CSP_KEYWORD_VALUE extends Exception {
 export const E_BLACKHOLE_INVALID_RATE_LIMIT = createError<[string]>(
 	"[blackhole] %s",
 	"E_BLACKHOLE_INVALID_RATE_LIMIT",
+);
+
+/** `xss.allowAttributes` names an attribute outside the opt-in list. */
+export const E_BLACKHOLE_INVALID_XSS_ATTRIBUTE = createError<[string]>(
+	"[blackhole] %s",
+	"E_BLACKHOLE_INVALID_XSS_ATTRIBUTE",
+);
+
+/** `xss.maxInputBytes` or `xss.maxDepth` is not a positive whole number. */
+export const E_BLACKHOLE_INVALID_XSS_LIMIT = createError<[string]>(
+	"[blackhole] %s",
+	"E_BLACKHOLE_INVALID_XSS_LIMIT",
+);
+
+/** The HTML handed to the sanitizer is longer than `xss.maxInputBytes`. */
+export const E_BLACKHOLE_HTML_TOO_LARGE = createError<[string]>(
+	"[blackhole] %s",
+	"E_BLACKHOLE_HTML_TOO_LARGE",
+);
+
+/** The HTML handed to the sanitizer nests elements deeper than `xss.maxDepth`. */
+export const E_BLACKHOLE_HTML_TOO_DEEP = createError<[string]>(
+	"[blackhole] %s",
+	"E_BLACKHOLE_HTML_TOO_DEEP",
+);
+
+/**
+ * The HTML handed to the sanitizer builds far more markup than it holds
+ * (misnested formatting elements re-created in every block).
+ */
+export const E_BLACKHOLE_HTML_TOO_COMPLEX = createError<[string]>(
+	"[blackhole] %s",
+	"E_BLACKHOLE_HTML_TOO_COMPLEX",
+);
+
+/** The engine was asked to run a check it does not have. */
+export const E_BLACKHOLE_UNKNOWN_CHECK = createError<[string]>(
+	"[blackhole] %s",
+	"E_BLACKHOLE_UNKNOWN_CHECK",
+);
+
+/** The request headers handed to the engine are not an object of strings. */
+export const E_BLACKHOLE_INVALID_HEADERS = createError<[string]>(
+	"[blackhole] %s",
+	"E_BLACKHOLE_INVALID_HEADERS",
+);
+
+/** The engine panicked while checking a request. */
+export const E_BLACKHOLE_INTERNAL_PANIC = createError<[string]>(
+	"[blackhole] %s",
+	"E_BLACKHOLE_INTERNAL_PANIC",
 );
 
 /** `checkRateLimit` was called without a configured store. */

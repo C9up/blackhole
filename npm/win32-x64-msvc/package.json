@@ -1,0 +1,29 @@
+{
+  "name": "@c9up/blackhole-win32-x64-msvc",
+  "version": "0.1.30",
+  "description": "The win32-x64-msvc native engine of @c9up/blackhole, installed by it as an optional dependency.",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "index.win32-x64-msvc.node",
+  "files": [
+    "index.win32-x64-msvc.node",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/C9up/blackhole.git",
+    "directory": "npm/win32-x64-msvc"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

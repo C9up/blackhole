@@ -11,6 +11,24 @@ pnpm add @c9up/blackhole
 ream configure @c9up/blackhole
 ```
 
+### Native engine
+
+Blackhole runs its checks through its Rust engine only. Each platform's engine is its own npm package, which `@c9up/blackhole` lists as an optional dependency at its exact version:
+
+| Platform | Package |
+|---|---|
+| Linux x64 (glibc) | `@c9up/blackhole-linux-x64-gnu` |
+| Linux arm64 (glibc) | `@c9up/blackhole-linux-arm64-gnu` |
+| macOS x64 | `@c9up/blackhole-darwin-x64` |
+| macOS arm64 | `@c9up/blackhole-darwin-arm64` |
+| Windows x64 | `@c9up/blackhole-win32-x64-msvc` |
+
+Your package manager installs only the one that matches the machine (`os`, `cpu` and `libc` fields), so an install downloads one binary and needs no Rust toolchain. An install run with optional dependencies omitted (`--no-optional`, `--omit=optional`) skips it.
+
+If the engine is missing, `createBlackhole()` throws `E_BLACKHOLE_NAPI_REQUIRED`, naming the package to install. The load error itself is the exception's `cause`.
+
+In a checkout of this repository, `pnpm build:napi` builds `index.<platform>.node` at the package root, and blackhole loads that file before looking for the platform package. `node scripts/platform-packages.mjs` rewrites the platform packages' manifests (`npm/<platform>/package.json`) and the optional dependencies after a version bump; CI fails when they are stale.
+
 ## Usage
 
 **Ream** — register the middleware, after the session middleware:
@@ -174,8 +192,18 @@ const safe = blackhole.sanitizeResponse(comment.body, 'text/html')
 
 The sanitizer keeps an allow-list of safe tags: scripts, styles, frames and
 event handlers go, and so do forms, inputs, buttons, SVG and media. Untrusted
-markup also loses `id`, `is`, `slot`, `part` and `data-*` — DOM clobbering,
-customized elements, framework bindings, shadow DOM.
+markup also loses `id`, `is`, `slot`, `part`, `data-*` and `class` — DOM
+clobbering, customized elements, framework bindings, shadow DOM, and the
+page's own stylesheet (`class="fixed inset-0 z-50"` is a full-page overlay).
+`style` keeps presentation properties only: no `position`, `z-index` or
+`url()`.
+
+The input is bounded: a `text/html` body over `xss.maxInputBytes` (1 MiB)
+throws `E_BLACKHOLE_HTML_TOO_LARGE`, one nested deeper than `xss.maxDepth`
+(512) throws `E_BLACKHOLE_HTML_TOO_DEEP`, and one whose parse would build more
+than four times its size (misnested formatting tags, re-created in every
+block) throws `E_BLACKHOLE_HTML_TOO_COMPLEX`. Catch them where you sanitize
+user input.
 
 `xss: true` runs the same pass over every `text/html` body the application
 sends, one that opens like a document (`<!doctype html>`) included — that
@@ -191,7 +219,7 @@ carry untrusted markup; the object form turns it on and opts attributes back
 in, for when nothing reads them from untrusted markup:
 
 ```ts
-xss: { allowAttributes: ['id', 'data-*'] }
+xss: { allowAttributes: ['id', 'data-*'], maxInputBytes: 256 * 1024, maxDepth: 256 }
 ```
 
 ## Rate limiting
@@ -278,6 +306,10 @@ await login.attempt(key, () => sendResetMail())   // runs only while there is bu
 await login.consume(key)                           // throws once over
 ```
 
+`penalize` counts the attempt before the callback runs and clears it on
+success, so a burst of requests sent together checks at most `requests`
+passwords per key.
+
 `Limiter` also has `increment`, `decrement`, `get`, `set`, `block`, `delete`,
 `remaining`, `availableIn`, `isBlocked` and `clear`. Counting is a fixed window
 per key, opened by its first request.
@@ -300,7 +332,9 @@ export default defineConfig({
 })
 ```
 
-The Redis store's `clear()` deletes its own keys (by prefix), not the database.
+The Redis store's `clear()` deletes its own keys (by prefix), not the database,
+also under a connection `keyPrefix`. Each budget counts on its own key, so
+two limiters given the same key never share a counter.
 The database store counts in a SQL table (PostgreSQL, MySQL, SQLite) through
 atlas' `db` or any client with `dialect` and `rawQuery()`; atlas is loaded on
 first use, never required. Its migration is

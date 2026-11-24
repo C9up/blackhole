@@ -10,7 +10,8 @@ use blackhole_engine::xss::sanitize_html;
 
 #[test]
 fn cannot_lift_content_over_the_page() {
-    let out = sanitize_html(r#"<div style="position:fixed;top:0;left:0;z-index:99999">over</div>"#);
+    let out = sanitize_html(r#"<div style="position:fixed;top:0;left:0;z-index:99999">over</div>"#)
+        .expect("within the limits");
     assert!(!out.contains("position"), "{out}");
     assert!(!out.contains("z-index"), "{out}");
     assert!(!out.contains("top"), "{out}");
@@ -25,7 +26,7 @@ fn cannot_make_the_browser_call_out() {
         r#"<div style="background-image:url(https://evil.example/p.png)">x</div>"#,
         r#"<div style="list-style-image:url(https://evil.example/p.png)">x</div>"#,
     ] {
-        let out = sanitize_html(input);
+        let out = sanitize_html(input).expect("within the limits");
         assert!(!out.contains("evil.example"), "{input} -> {out}");
     }
 }
@@ -33,9 +34,12 @@ fn cannot_make_the_browser_call_out() {
 #[test]
 fn ordinary_presentation_still_works() {
     // The reason `style` is allowed at all — this must keep working.
-    let out = sanitize_html(r#"<p style="color:red;font-weight:bold">hi</p>"#);
+    let out = sanitize_html(r#"<p style="color:red;font-weight:bold">hi</p>"#)
+        .expect("within the limits");
     assert!(out.contains("color:red"), "{out}");
     assert!(out.contains("font-weight:bold"), "{out}");
     // background-color is the half of `background` that fetches nothing.
-    assert!(sanitize_html(r#"<p style="background-color:#eee">x</p>"#).contains("background-color"));
+    assert!(sanitize_html(r#"<p style="background-color:#eee">x</p>"#)
+        .expect("within the limits")
+        .contains("background-color"));
 }

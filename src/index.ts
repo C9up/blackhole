@@ -18,6 +18,8 @@
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { arch, platform } from "node:process";
+import type { ErrorClass } from "@c9up/flare";
 import { clientKey } from "./clientKey.js";
 import {
 	type CspKeywordResolver,
@@ -27,20 +29,33 @@ import {
 import { durationToSeconds } from "./duration.js";
 import {
 	E_BLACKHOLE_EMPTY_RATE_LIMIT_KEY,
+	E_BLACKHOLE_HTML_TOO_COMPLEX,
+	E_BLACKHOLE_HTML_TOO_DEEP,
+	E_BLACKHOLE_HTML_TOO_LARGE,
+	E_BLACKHOLE_INTERNAL_PANIC,
 	E_BLACKHOLE_INVALID_CORS,
 	E_BLACKHOLE_INVALID_CSP,
 	E_BLACKHOLE_INVALID_HEADER_VALUE,
+	E_BLACKHOLE_INVALID_HEADERS,
 	E_BLACKHOLE_INVALID_RATE_LIMIT,
 	E_BLACKHOLE_INVALID_SECRET,
 	E_BLACKHOLE_INVALID_XFRAME,
+	E_BLACKHOLE_INVALID_XSS_ATTRIBUTE,
+	E_BLACKHOLE_INVALID_XSS_LIMIT,
 	E_BLACKHOLE_NAPI_REQUIRED,
 	E_BLACKHOLE_RATE_LIMIT_STORE_MISSING,
 	E_BLACKHOLE_REMOVED_OPTION,
 	E_BLACKHOLE_SECRET_MISSING,
+	E_BLACKHOLE_UNKNOWN_CHECK,
 	E_BLACKHOLE_UNKNOWN_OPTION,
 	E_BLACKHOLE_WEAK_SECRET,
 } from "./errors.js";
-import { hasFunctions, loadNativeBinary } from "./vendor/nativeBinary.js";
+import {
+	hasFunctions,
+	loadNativeBinary,
+	muslHint,
+	supportedTargets,
+} from "./vendor/nativeBinary.js";
 import { inProduction } from "./vendor/nodeEnv.js";
 
 /**
@@ -79,11 +94,77 @@ function isNativeModule(value: unknown): value is NativeModule {
 	return hasFunctions(value, NATIVE_CALLS);
 }
 
+/**
+ * The npm name the platform packages derive from: `@c9up/blackhole-<suffix>`,
+ * one per target, each an optional dependency pinned to this version.
+ */
+const PACKAGE_NAME = "@c9up/blackhole";
+
+/**
+ * What to do about a missing engine, phrased for whoever has to fix it.
+ *
+ * An application installs the platform package; a checkout of blackhole
+ * builds the local binary. The load error itself is not in here: it names
+ * paths on the host, so it travels as the refusal's `cause` instead of its
+ * message.
+ */
+function remedy(
+	suffix: string | undefined,
+	platformPackage: string | undefined,
+): string {
+	if (suffix === undefined) {
+		return `no prebuilt binary for ${platform}-${arch}; blackhole ships one for ${supportedTargets().join(", ")}.`;
+	}
+	if (platformPackage === undefined) {
+		return `index.${suffix}.node failed to load. Rebuild it: cd packages/blackhole && pnpm build:napi`;
+	}
+	return (
+		`install ${platformPackage} at the exact version of ${PACKAGE_NAME}: it is the optional dependency that carries the ${suffix} binary, ` +
+		"and an install that omits optional dependencies skips it. " +
+		`In a checkout of blackhole, build it instead: pnpm build:napi.${muslHint()}`
+	);
+}
+
 // Absent is not an error here: `createBlackhole` throws at use time, naming
 // what the caller was trying to do.
-const attempt = loadNativeBinary(isNativeModule, NATIVE_CALLS);
-const native = attempt.loaded ? attempt.binary : undefined;
-const loadError = attempt.loaded ? undefined : attempt.cause;
+const attempt = loadNativeBinary(isNativeModule, NATIVE_CALLS, {
+	packageName: PACKAGE_NAME,
+});
+
+/** Every code the engine sends, with the class it becomes. */
+const ENGINE_ERRORS = new Map<string, ErrorClass<[string]>>([
+	["E_BLACKHOLE_INVALID_XSS_ATTRIBUTE", E_BLACKHOLE_INVALID_XSS_ATTRIBUTE],
+	["E_BLACKHOLE_INVALID_XSS_LIMIT", E_BLACKHOLE_INVALID_XSS_LIMIT],
+	["E_BLACKHOLE_HTML_TOO_LARGE", E_BLACKHOLE_HTML_TOO_LARGE],
+	["E_BLACKHOLE_HTML_TOO_DEEP", E_BLACKHOLE_HTML_TOO_DEEP],
+	["E_BLACKHOLE_HTML_TOO_COMPLEX", E_BLACKHOLE_HTML_TOO_COMPLEX],
+	["E_BLACKHOLE_INVALID_RATE_LIMIT", E_BLACKHOLE_INVALID_RATE_LIMIT],
+	["E_BLACKHOLE_UNKNOWN_CHECK", E_BLACKHOLE_UNKNOWN_CHECK],
+	["E_BLACKHOLE_INVALID_HEADERS", E_BLACKHOLE_INVALID_HEADERS],
+	["E_BLACKHOLE_INTERNAL_PANIC", E_BLACKHOLE_INTERNAL_PANIC],
+]);
+
+/**
+ * Run an engine call, a refusal rethrown as the class its code names.
+ *
+ * A JavaScript class cannot cross the NAPI boundary, so the engine starts its
+ * message with the code (`E_BLACKHOLE_X: …`) and this puts the class back,
+ * the native error kept as `cause`. A message without a known code is
+ * rethrown as it came rather than given a guessed one.
+ */
+function callEngine<T>(call: () => T): T {
+	try {
+		return call();
+	} catch (error) {
+		if (!(error instanceof Error)) throw error;
+		const separator = error.message.indexOf(": ");
+		const ErrorClass = ENGINE_ERRORS.get(error.message.slice(0, separator));
+		if (separator <= 0 || ErrorClass === undefined) throw error;
+		throw new ErrorClass([error.message.slice(separator + 2)], {
+			cause: error,
+		});
+	}
+}
 
 /** `X-Frame-Options`: who may frame the pages. */
 export interface XFrameConfig {
@@ -955,7 +1036,13 @@ export interface RateLimitDecision {
 }
 
 /** The attributes an untrusted HTML fragment may keep when opted into. */
-export type XssOptInAttribute = "id" | "is" | "slot" | "part" | "data-*";
+export type XssOptInAttribute =
+	| "id"
+	| "is"
+	| "slot"
+	| "part"
+	| "data-*"
+	| "class";
 
 /** XSS response sanitization, in its object form. */
 export interface XssConfig {
@@ -968,10 +1055,23 @@ export interface XssConfig {
 	 * Attributes the sanitizer keeps although it drops them by default: `id`
 	 * (DOM clobbering — `<a id="config">` shadows `window.config`), `is`
 	 * (customized built-in elements), `data-*` (read by client-side frameworks
-	 * as bindings), `slot` and `part` (shadow DOM). Opt in only when the page
-	 * reads none of them from untrusted markup.
+	 * as bindings), `slot` and `part` (shadow DOM), `class` (selects every rule
+	 * of the page's stylesheet: `class="fixed inset-0 z-50"` draws a
+	 * full-page overlay on a page that ships utility classes). Opt in only
+	 * when the page reads none of them from untrusted markup.
 	 */
 	allowAttributes?: XssOptInAttribute[];
+	/**
+	 * Longest HTML the sanitizer accepts, in UTF-8 bytes (default: 1 MiB).
+	 * A longer body is refused with `E_BLACKHOLE_HTML_TOO_LARGE`.
+	 */
+	maxInputBytes?: number;
+	/**
+	 * Deepest element nesting the sanitizer accepts (default: 512, where
+	 * browsers stop). Deeper markup is refused with `E_BLACKHOLE_HTML_TOO_DEEP`.
+	 * The parse slows with the square of the nesting: raise it with care.
+	 */
+	maxDepth?: number;
 }
 
 /** The framework objects a CSP keyword resolver receives for this request. */
@@ -1100,6 +1200,12 @@ export interface Blackhole {
 	 * whatever its first bytes look like (`<!doctype html>` included); any
 	 * other type comes back unchanged. Always, whatever `xss` says — what an
 	 * application calls on input it stores.
+	 *
+	 * A `text/html` body past the sanitizer's bounds is refused, never
+	 * returned as it came: `E_BLACKHOLE_HTML_TOO_LARGE` (over
+	 * `xss.maxInputBytes`), `E_BLACKHOLE_HTML_TOO_DEEP` (nested deeper than
+	 * `xss.maxDepth`), `E_BLACKHOLE_HTML_TOO_COMPLEX` (it builds more than four
+	 * times its own size, plus 64 KiB).
 	 */
 	sanitizeResponse(body: string, contentType: string): string;
 	/** Whether the response phase sanitizes the application's `text/html` fragments (`xss`). */
@@ -1223,6 +1329,22 @@ function assertRateLimit(rateLimit: {
 		if (!Number.isSafeInteger(value) || value <= 0 || value > 0xffffffff) {
 			throw new E_BLACKHOLE_INVALID_RATE_LIMIT([
 				`rateLimit.${field} must be a positive whole number, got ${String(value)}.`,
+			]);
+		}
+	}
+}
+
+/** The sanitizer's bounds: positive whole numbers the engine can hold. */
+function assertXssLimits(xss: XssConfig): void {
+	const fields: Array<[string, number | undefined]> = [
+		["maxInputBytes", xss.maxInputBytes],
+		["maxDepth", xss.maxDepth],
+	];
+	for (const [field, value] of fields) {
+		if (value === undefined) continue;
+		if (!Number.isSafeInteger(value) || value <= 0 || value > 0xffffffff) {
+			throw new E_BLACKHOLE_INVALID_XSS_LIMIT([
+				`xss.${field} must be a positive whole number, got ${String(value)}.`,
 			]);
 		}
 	}
@@ -1365,12 +1487,13 @@ export function pathContext(
  * @throws If the NAPI binary is not available.
  */
 export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
-	if (!native) {
+	if (!attempt.loaded) {
 		throw new E_BLACKHOLE_NAPI_REQUIRED(
-			undefined,
-			loadError !== undefined ? { cause: loadError } : undefined,
+			[remedy(attempt.suffix, attempt.platformPackage)],
+			attempt.cause !== undefined ? { cause: attempt.cause } : undefined,
 		);
 	}
+	const native = attempt.binary;
 
 	assertNoRetiredOptions(options);
 	const csrf = resolveCsrf(options.csrf);
@@ -1390,6 +1513,7 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 		assertUsableSecret(secret);
 	}
 	if (options.rateLimit !== undefined) assertRateLimit(options.rateLimit);
+	assertXssLimits(xss);
 	// A distributed store moves counting + the 429 decision into JS (see
 	// `checkRateLimit`), so the in-process Rust counter must NOT also run — pass
 	// no max/window to the engine when a store is configured.
@@ -1400,17 +1524,22 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 	// and media from every fragment it sends. Upstream has no response
 	// sanitizer at all; blackhole keeps it as an opt-in.
 	const xssEnabled = xss.enabled ?? true;
-	const filter = new native.Blackhole(
-		csrf.enabled,
-		useRustLimiter ? rateLimit?.max : undefined,
-		useRustLimiter ? rateLimit?.windowSeconds : undefined,
-		options.pathTraversal ?? true,
-		options.paramPollution ?? true,
-		csrf.exceptRoutes,
-		csrf.methods,
-		secret,
-		csrf.trustedOrigins,
-		xss.allowAttributes ?? [],
+	const filter = callEngine(
+		() =>
+			new native.Blackhole(
+				csrf.enabled,
+				useRustLimiter ? rateLimit?.max : undefined,
+				useRustLimiter ? rateLimit?.windowSeconds : undefined,
+				options.pathTraversal ?? true,
+				options.paramPollution ?? true,
+				csrf.exceptRoutes,
+				csrf.methods,
+				secret,
+				csrf.trustedOrigins,
+				xss.allowAttributes ?? [],
+				xss.maxInputBytes,
+				xss.maxDepth,
+			),
 	);
 
 	const baseHeaders = computeSecurityHeaders(options);
@@ -1431,25 +1560,26 @@ export function createBlackhole(options: BlackholeOptions = {}): Blackhole {
 	return {
 		check(req) {
 			const headersJson = JSON.stringify(req.headers);
-			const result = filter.check(
-				req.method,
-				req.path,
-				req.query ?? "",
-				headersJson,
-				req.body ?? "",
-				req.remoteAddr ?? "",
-				req.protocol,
-				req.checks,
-				req.host,
-				req.csrfBinding,
+			return callEngine(() =>
+				filter.check(
+					req.method,
+					req.path,
+					req.query ?? "",
+					headersJson,
+					req.body ?? "",
+					req.remoteAddr ?? "",
+					req.protocol,
+					req.checks,
+					req.host,
+					req.csrfBinding,
+				),
 			);
-			return result;
 		},
 		generateCsrfToken(binding) {
 			return filter.generateCsrfToken(binding);
 		},
 		sanitizeResponse(body: string, contentType: string) {
-			return filter.sanitizeResponse(body, contentType);
+			return callEngine(() => filter.sanitizeResponse(body, contentType));
 		},
 		xssEnabled() {
 			return xssEnabled;

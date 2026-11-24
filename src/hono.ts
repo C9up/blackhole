@@ -85,6 +85,17 @@ function nodeRequestTarget(env: unknown): string | undefined {
 }
 
 /**
+ * The method `@hono/node-server` received (`c.env.incoming.method`). Hono's
+ * `methodOverride` dispatches a new `Request` under the method a form field
+ * names and hands it the same `env`, so this still names the wire method.
+ */
+function nodeWireMethod(env: unknown): string | undefined {
+	const incoming: unknown = Reflect.get(Object(env), "incoming");
+	const method: unknown = Reflect.get(Object(incoming), "method");
+	return typeof method === "string" ? method : undefined;
+}
+
+/**
  * The form fields the engine reads a `_csrf` token from. Hono caches the body,
  * so the route can still read it.
  */
@@ -142,12 +153,13 @@ export function blackholeHono(
 		const target = nodeRequestTarget(c.env);
 		const request: CoreRequest = {
 			method: c.req.method,
+			wireMethod: nodeWireMethod(c.env),
 			// The raw target where the runtime keeps one: a `Request` URL has
 			// already had `..` and `%2e%2e` resolved by the WHATWG parser.
 			path: target === undefined ? c.req.path : rawPathOf(target),
 			url: c.req.url,
 			headers: c.req.header(),
-			body: await csrfBody(c),
+			body: bh.csrfEnabled() ? await csrfBody(c) : undefined,
 			remoteAddr: rateLimitKey,
 			protocol: protocol
 				? protocol(c)

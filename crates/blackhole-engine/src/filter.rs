@@ -26,6 +26,8 @@ pub struct BlackholeConfig {
     /// Attributes the XSS sanitizer keeps on top of its default allow-list —
     /// a subset of [`crate::xss::OPT_IN_ATTRIBUTES`]. Empty by default.
     pub xss_allow_attributes: Vec<String>,
+    /// The bounds the XSS sanitizer holds its input to.
+    pub xss_limits: crate::html_limits::HtmlLimits,
 }
 
 impl Default for BlackholeConfig {
@@ -40,6 +42,7 @@ impl Default for BlackholeConfig {
             csrf_trusted_origins: Vec::new(),
             csrf_secret: Vec::new(),
             xss_allow_attributes: Vec::new(),
+            xss_limits: crate::html_limits::HtmlLimits::default(),
         }
     }
 }

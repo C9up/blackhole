@@ -73,6 +73,11 @@ export interface ReamContext {
 	route?: { pattern: string } | null;
 	request: {
 		method(): string;
+		/**
+		 * The method on the request line, whatever `_method` says (Ream's
+		 * `request.intended()`). The CSRF decision is taken on it.
+		 */
+		intended?(): string;
 		url(full?: boolean): string;
 		path(): string;
 		header(name: string): string | undefined;
@@ -359,25 +364,30 @@ function rotateCsrfSecret(
 	);
 }
 
-/** The engine's view of a Ream request. */
+/**
+ * The engine's view of a Ream request. `csrf` carries what only the CSRF check
+ * reads — the session binding and the body's `_csrf` field; the guard phase,
+ * and a request under `csrf: false`, are described without the body.
+ */
 function coreRequest(
 	ctx: ReamContext,
 	remoteAddr: string,
-	csrfBinding?: string,
+	csrf?: { binding: string | undefined },
 ): CoreRequest {
 	return {
 		method: ctx.request.method(),
+		wireMethod: ctx.request.intended?.(),
 		path: ctx.request.path(),
 		url: ctx.request.url(true),
 		headers: ctx.request.headers(),
 		// Ream's body parser has already run, so a server-rendered form arrives
 		// as an object — the raw urlencoded string the engine would scan for
 		// `_csrf` no longer exists. Rebuild the field, as the other adapters do.
-		body: csrfBodyString(ctx.request.body()),
+		body: csrf ? csrfBodyString(ctx.request.body()) : undefined,
 		remoteAddr,
 		protocol: ctx.request.protocol?.(),
 		host: ctx.request.host?.() ?? undefined,
-		csrfBinding,
+		csrfBinding: csrf?.binding,
 		routePattern: ctx.route?.pattern,
 		context: ctx,
 	};
@@ -419,7 +429,14 @@ export async function blackholeMiddleware(ctx: ReamContext, next: ReamNext) {
 	// With CSRF off the session is left alone: no secret is written into it.
 	const session = bh.csrfEnabled() ? csrfSessionOf(ctx) : undefined;
 	const sessionId = session?.id();
-	const outcome = runCsrfPhase(bh, coreRequest(ctx, "", session?.secret()));
+	const outcome = runCsrfPhase(
+		bh,
+		coreRequest(
+			ctx,
+			"",
+			bh.csrfEnabled() ? { binding: session?.secret() } : undefined,
+		),
+	);
 	if (outcome.kind === "reject") {
 		applySecurityHeaders(ctx, bh);
 		if (isBadCsrfBody(outcome.body)) {

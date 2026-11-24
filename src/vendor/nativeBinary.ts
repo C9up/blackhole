@@ -82,10 +82,38 @@ export function muslHint(): string {
 		: "";
 }
 
-/** What a load attempt did, so the caller can apply its own policy. */
+/**
+ * What a load attempt did, so the caller can apply its own policy.
+ *
+ * `platformPackage` is set when the local file was absent and the platform
+ * package was looked for instead: it is the package to tell the user to install.
+ */
 export type NativeBinaryResult<T> =
 	| { loaded: true; binary: T }
-	| { loaded: false; suffix: string | undefined; cause?: unknown };
+	| {
+			loaded: false;
+			suffix: string | undefined;
+			cause?: unknown;
+			platformPackage?: string;
+	  };
+
+/** Where a package's binaries come from, beyond its own root. */
+export interface NativeBinaryOptions {
+	/**
+	 * The package's own npm name, when its binaries ship as one npm package per
+	 * platform: `<packageName>-<suffix>`, each an optional dependency pinned to
+	 * the package's exact version. Without it, the local file is the only place
+	 * looked at.
+	 */
+	packageName?: string;
+}
+
+/** Whether `cause` is Node's "no such module" (and not a module that failed to load). */
+function isModuleNotFound(cause: unknown): boolean {
+	return (
+		cause instanceof Error && Reflect.get(cause, "code") === "MODULE_NOT_FOUND"
+	);
+}
 
 /** Whether `value` carries a function under `name` (a napi class is one too). */
 function hasFunction(value: object, name: string): boolean {
@@ -134,12 +162,20 @@ export function hasFunctions(
 }
 
 /**
- * Load `<package root>/index.<suffix>.node`, and check it is the binary the
- * package calls.
+ * Load `<package root>/index.<suffix>.node` or, when that file is absent and
+ * `options.packageName` is given, the platform package
+ * `<packageName>-<suffix>`; then check it is the binary the package calls.
  *
- * The path is fixed rather than passed: this file is generated into
+ * The local file comes first because a checkout builds it there
+ * (`build:napi`), so tests and local builds run the Rust they just compiled. A
+ * published tarball carries no `.node` file, so an install falls through to
+ * the platform package its package manager picked for this host. A local file
+ * that exists but fails to load is reported as is, never papered over by the
+ * package: that is a broken build to fix, not a reason to run other code.
+ *
+ * Both names are fixed rather than passed: this file is generated into
  * `<package>/src/vendor/`, so the package root is always two levels up, from
- * `src` and from `dist` alike.
+ * `src` and from `dist` alike, and the suffix comes from the table above.
  *
  * `isBinary` is the package's own check of what it calls. A declaration only
  * says what the Rust promises: a stale build, or one from another version,
@@ -151,24 +187,40 @@ export function hasFunctions(
 export function loadNativeBinary<T>(
 	isBinary: (value: unknown) => value is T,
 	expects?: readonly string[],
+	options?: NativeBinaryOptions,
 ): NativeBinaryResult<T> {
 	const suffix = nativeBinarySuffix();
 	if (suffix === undefined) return { loaded: false, suffix };
 	const here = dirname(fileURLToPath(import.meta.url));
+	const nodeRequire = createRequire(import.meta.url);
+	const local = `index.${suffix}.node`;
 	let loaded: unknown;
+	let platformPackage: string | undefined;
 	try {
-		const nodeRequire = createRequire(import.meta.url);
-		loaded = nodeRequire(join(here, `../../index.${suffix}.node`));
+		loaded = nodeRequire(join(here, `../../${local}`));
 	} catch (cause) {
-		return { loaded: false, suffix, cause };
+		if (options?.packageName === undefined || !isModuleNotFound(cause)) {
+			return { loaded: false, suffix, cause };
+		}
+		platformPackage = `${options.packageName}-${suffix}`;
+		try {
+			loaded = nodeRequire(platformPackage);
+		} catch (packageCause) {
+			return { loaded: false, suffix, cause: packageCause, platformPackage };
+		}
 	}
 	if (isBinary(loaded)) return { loaded: true, binary: loaded };
+	const remedy =
+		platformPackage === undefined
+			? "rebuild it"
+			: "install the version the package that loads it pins";
 	return {
 		loaded: false,
 		suffix,
+		platformPackage,
 		cause: new Error(
-			`index.${suffix}.node loaded, but ${rejection(loaded, expects)}. ` +
-				"The binary is stale or from another version: rebuild it.",
+			`${platformPackage ?? local} loaded, but ${rejection(loaded, expects)}. ` +
+				`The binary is stale or from another version: ${remedy}.`,
 		),
 	};
 }

@@ -4,6 +4,10 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::panic::catch_unwind;
 
+// Every refusal below starts its message with its code (`E_BLACKHOLE_X: …`):
+// a JavaScript class cannot cross the NAPI boundary, so the TypeScript side
+// reads the code back and rethrows the matching `errors.E_BLACKHOLE_X`.
+
 #[napi]
 pub struct Blackhole {
     filter: blackhole_engine::BlackholeFilter,
@@ -31,6 +35,8 @@ impl Blackhole {
         csrf_secret: Option<String>,
         csrf_trusted_origins: Option<Vec<String>>,
         xss_allow_attributes: Option<Vec<String>>,
+        xss_max_input_bytes: Option<u32>,
+        xss_max_depth: Option<u32>,
     ) -> Result<Self> {
         let xss_allow_attributes = xss_allow_attributes.unwrap_or_default();
         // A name outside the opt-in list is refused rather than ignored: the
@@ -41,19 +47,36 @@ impl Blackhole {
             .find(|name| !blackhole_engine::xss::OPT_IN_ATTRIBUTES.contains(&name.as_str()))
         {
             return Err(Error::from_reason(format!(
-                "[blackhole] xss.allowAttributes: '{}' cannot be allowed (expected one of {})",
+                "E_BLACKHOLE_INVALID_XSS_ATTRIBUTE: xss.allowAttributes: '{}' cannot be allowed (expected one of {})",
                 unknown,
                 blackhole_engine::xss::OPT_IN_ATTRIBUTES.join(", ")
             )));
         }
+        // A bound of 0 would refuse every body; an unbounded one is what the
+        // bound is there to prevent. The TypeScript side validates first.
+        let defaults = blackhole_engine::html_limits::HtmlLimits::default();
+        let xss_limits = blackhole_engine::html_limits::HtmlLimits {
+            max_input_bytes: match xss_max_input_bytes {
+                Some(0) => return Err(Error::from_reason(
+                    "E_BLACKHOLE_INVALID_XSS_LIMIT: xss.maxInputBytes must be a whole number greater than 0",
+                )),
+                Some(bytes) => bytes as usize,
+                None => defaults.max_input_bytes,
+            },
+            max_depth: match xss_max_depth {
+                Some(0) => return Err(Error::from_reason(
+                    "E_BLACKHOLE_INVALID_XSS_LIMIT: xss.maxDepth must be a whole number greater than 0",
+                )),
+                Some(depth) => depth as usize,
+                None => defaults.max_depth,
+            },
+        };
         let rate_limit = match (rate_limit_max, rate_limit_window) {
             // A limit of 0 or a window of 0 would let every request through
             // (a zero window expires each hit at once): refused, not ignored.
-            (Some(0), _) | (_, Some(0)) => {
-                return Err(Error::from_reason(
-                    "[blackhole] rate limit max and window must be greater than 0",
-                ))
-            }
+            (Some(0), _) | (_, Some(0)) => return Err(Error::from_reason(
+                "E_BLACKHOLE_INVALID_RATE_LIMIT: rate limit max and window must be greater than 0",
+            )),
             (Some(max), Some(window)) => Some((max, window as u64)),
             _ => None,
         };
@@ -68,6 +91,7 @@ impl Blackhole {
                 csrf_trusted_origins: csrf_trusted_origins.unwrap_or_default(),
                 csrf_secret: csrf_secret.map(String::into_bytes).unwrap_or_default(),
                 xss_allow_attributes,
+                xss_limits,
             }),
         })
     }
@@ -126,7 +150,7 @@ impl Blackhole {
                         "csrf" => checks.csrf = true,
                         other => {
                             return Err(Error::from_reason(format!(
-                            "[blackhole] unknown check '{}' (expected rateLimit, shield or csrf)",
+                            "E_BLACKHOLE_UNKNOWN_CHECK: unknown check '{}' (expected rateLimit, shield or csrf)",
                             other
                         )))
                         }
@@ -136,8 +160,12 @@ impl Blackhole {
             }
         };
         let headers: std::collections::HashMap<String, String> =
-            serde_json::from_str(&headers_json)
-                .map_err(|e| Error::from_reason(format!("Invalid headers JSON: {}", e)))?;
+            serde_json::from_str(&headers_json).map_err(|e| {
+                Error::from_reason(format!(
+                    "E_BLACKHOLE_INVALID_HEADERS: invalid headers JSON: {}",
+                    e
+                ))
+            })?;
         let req = blackhole_engine::Request {
             method,
             path,
@@ -170,7 +198,9 @@ impl Blackhole {
                 }
                 Ok(value)
             }
-            Err(_) => Err(Error::from_reason("Internal panic in blackhole engine")),
+            Err(_) => Err(Error::from_reason(
+                "E_BLACKHOLE_INTERNAL_PANIC: internal panic in the blackhole engine",
+            )),
         }
     }
 
@@ -181,12 +211,19 @@ impl Blackhole {
     /// Always, whatever the `xss` option says: that option decides whether
     /// the host runs this on its own responses, while a direct call is how an
     /// application cleans input it is about to store.
+    ///
+    /// A `text/html` body past the configured bounds is refused with
+    /// `E_BLACKHOLE_HTML_TOO_LARGE`, `E_BLACKHOLE_HTML_TOO_DEEP` or
+    /// `E_BLACKHOLE_HTML_TOO_COMPLEX`, never returned unsanitized.
     #[napi]
-    pub fn sanitize_response(&self, body: String, content_type: String) -> String {
+    pub fn sanitize_response(&self, body: String, content_type: String) -> Result<String> {
+        let config = self.filter.config();
         blackhole_engine::xss::sanitize_response_with(
             &body,
             &content_type,
-            &self.filter.config().xss_allow_attributes,
+            &config.xss_allow_attributes,
+            &config.xss_limits,
         )
+        .map_err(|refusal| Error::from_reason(format!("{}: {}", refusal.code(), refusal)))
     }
 }

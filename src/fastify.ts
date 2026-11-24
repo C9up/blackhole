@@ -32,7 +32,8 @@ interface FastifyRequest {
 	method: string;
 	/** The request target as received — path and query, nothing resolved. */
 	url: string;
-	raw?: { url?: string };
+	/** Node's request: its `method` is the one on the request line. */
+	raw?: { url?: string; method?: string };
 	/** The matched route's pattern (Fastify 4). */
 	routerPath?: string;
 	/** The matched route's options; `url` is its pattern (Fastify ≥ 4.10). */
@@ -134,6 +135,7 @@ export function blackholeFastify(options: BlackholeOptions = {}) {
 			const target = request.raw?.url ?? request.url;
 			const coreReq: CoreRequest = {
 				method: request.method,
+				wireMethod: request.raw?.method,
 				// The path as the client sent it. Not `routerPath` — that is the
 				// route PATTERN (`/files/*`), which never holds a `..` — and not
 				// `new URL().pathname`, which resolves `..` and `%2e%2e` away
@@ -145,7 +147,7 @@ export function blackholeFastify(options: BlackholeOptions = {}) {
 				host: request.host ?? request.hostname,
 				routePattern: request.routeOptions?.url ?? request.routerPath,
 				headers: flattenHeaders(request.headers),
-				body: csrfBodyString(request.body),
+				body: bh.csrfEnabled() ? csrfBodyString(request.body) : undefined,
 				remoteAddr: rateLimitKey,
 				protocol: request.protocol,
 			};

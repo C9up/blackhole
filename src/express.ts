@@ -31,6 +31,11 @@ import {
 /** Structural subset of an Express request the adapter reads. */
 interface ExpressRequest {
 	method: string;
+	/**
+	 * The method on the request line, kept by an override middleware
+	 * (`method-override`) when it rewrites `method`.
+	 */
+	originalMethod?: string;
 	originalUrl?: string;
 	url: string;
 	path?: string;
@@ -160,12 +165,13 @@ export function blackholeExpress(options: BlackholeOptions = {}) {
 
 		const coreReq: CoreRequest = {
 			method: req.method,
+			wireMethod: req.originalMethod,
 			// `req.path` is the raw path (no `..` resolved); the fallback must be
 			// too, never a WHATWG-normalized one.
 			path: req.path ?? rawPathOf(req.url),
 			url: req.originalUrl ?? req.url,
 			headers,
-			body: csrfBodyString(req.body),
+			body: bh.csrfEnabled() ? csrfBodyString(req.body) : undefined,
 			remoteAddr: rateLimitKey,
 			protocol: req.protocol,
 			host: expressHost(req.hostname, headers),

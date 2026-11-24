@@ -12,6 +12,7 @@ pub mod constant_time;
 pub mod crypto;
 pub mod csrf;
 pub mod filter;
+pub mod html_limits;
 pub mod rate_limit;
 pub mod shield;
 pub mod xss;

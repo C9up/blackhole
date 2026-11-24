@@ -16,6 +16,8 @@ export declare class Blackhole {
 		csrfSecret?: string | undefined | null,
 		csrfTrustedOrigins?: Array<string> | undefined | null,
 		xssAllowAttributes?: Array<string> | undefined | null,
+		xssMaxInputBytes?: number | undefined | null,
+		xssMaxDepth?: number | undefined | null,
 	);
 	/**
 	 * A fresh CSRF token. With a `binding` (the session's secret), its
@@ -59,6 +61,10 @@ export declare class Blackhole {
 	 * Always, whatever the `xss` option says: that option decides whether
 	 * the host runs this on its own responses, while a direct call is how an
 	 * application cleans input it is about to store.
+	 *
+	 * A `text/html` body past the configured bounds is refused with
+	 * `E_BLACKHOLE_HTML_TOO_LARGE`, `E_BLACKHOLE_HTML_TOO_DEEP` or
+	 * `E_BLACKHOLE_HTML_TOO_COMPLEX`, never returned unsanitized.
 	 */
 	sanitizeResponse(body: string, contentType: string): string;
 }

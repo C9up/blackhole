@@ -340,21 +340,88 @@ export class RedisLimiterStore implements LimiterStore {
 		return (await client.del(this.#key(key))) > 0;
 	}
 
+	/**
+	 * Delete this store's keys, and nothing else.
+	 *
+	 * A connection with a `keyPrefix` adds it to the key of every command
+	 * but not to the MATCH pattern of SCAN, which answers full key names:
+	 * the pattern carries that prefix, and each key loses it again before
+	 * DEL adds it back. Both prefixes are escaped, so a `*` or `?` in one
+	 * matches itself only. On a cluster every master is scanned.
+	 */
 	async clear(): Promise<void> {
 		const client = await this.#client();
-		let cursor = "0";
-		do {
-			const [next, keys] = await client.scan(
-				cursor,
-				"MATCH",
-				`${this.#prefix}:*`,
-				"COUNT",
-				500,
-			);
-			for (const key of keys) await client.del(key);
-			cursor = next;
-		} while (cursor !== "0");
+		const connectionPrefix = connectionKeyPrefix(client);
+		const pattern = `${escapeGlob(connectionPrefix)}${escapeGlob(this.#prefix)}:*`;
+		for (const node of scanTargets(client)) {
+			let cursor = "0";
+			do {
+				const [next, keys] = await scanPage(node, cursor, pattern);
+				for (const key of keys) {
+					if (key.startsWith(connectionPrefix)) {
+						await client.del(key.slice(connectionPrefix.length));
+					}
+				}
+				cursor = next;
+			} while (cursor !== "0");
+		}
 	}
+}
+
+/** `value` matched literally by a Redis glob pattern. */
+function escapeGlob(value: string): string {
+	return value.replace(/[*?[\]\\]/g, "\\$&");
+}
+
+/**
+ * The prefix a connection adds to every key it is given (ioredis'
+ * `keyPrefix`), read off a bare ioredis client or a quasar connection's
+ * `ioConnection`. Empty when there is none.
+ */
+function connectionKeyPrefix(client: unknown): string {
+	for (const holder of [client, Reflect.get(Object(client), "ioConnection")]) {
+		const options: unknown = Reflect.get(Object(holder), "options");
+		const prefix: unknown = Reflect.get(Object(options), "keyPrefix");
+		if (typeof prefix === "string") return prefix;
+	}
+	return "";
+}
+
+/**
+ * The clients SCAN runs on: every master of an ioredis cluster — SCAN on the
+ * cluster itself walks one node only — or the client itself.
+ */
+function scanTargets(client: LimiterRedisClient): unknown[] {
+	const io: unknown = Reflect.get(Object(client), "ioConnection") ?? client;
+	const nodes: unknown = Reflect.get(Object(io), "nodes");
+	if (typeof nodes !== "function") return [client];
+	const masters: unknown = Reflect.apply(nodes, io, ["master"]);
+	return Array.isArray(masters) && masters.length > 0 ? masters : [client];
+}
+
+/** One SCAN page on `node`: the next cursor and the keys it matched. */
+async function scanPage(
+	node: unknown,
+	cursor: string,
+	pattern: string,
+): Promise<[string, string[]]> {
+	const scan: unknown = Reflect.get(Object(node), "scan");
+	if (typeof scan !== "function") return ["0", []];
+	const reply: unknown = await Reflect.apply(scan, node, [
+		cursor,
+		"MATCH",
+		pattern,
+		"COUNT",
+		500,
+	]);
+	if (!Array.isArray(reply)) return ["0", []];
+	const [next, keys]: unknown[] = reply;
+	return [
+		typeof next === "string" ? next : "0",
+		Array.isArray(keys)
+			? keys.filter((key): key is string => typeof key === "string")
+			: [],
+	];
 }
 
 // ── The database store ───────────────────────────────────────────────────
@@ -772,6 +839,21 @@ export class Limiter {
 				: durationToSeconds(options.blockDuration, "a limiter blockDuration");
 	}
 
+	/**
+	 * The key as stored: under this budget's own namespace,
+	 * `<requests>/<duration>/<blockDuration>:<key>`.
+	 *
+	 * NAMED DEVIATION, stricter than upstream, which stores `<key>` under one
+	 * prefix per store: two budgets given the same key ("5 a minute" and "100
+	 * a day" on `login_<ip>`) then shared one counter in Redis or a database
+	 * — every request counted twice, and the long budget expiring with the
+	 * short window. Each budget now counts on its own, in every store, as
+	 * the memory store already did.
+	 */
+	#stored(key: string): string {
+		return `${this.requests}/${this.duration}/${this.blockDuration}:${key}`;
+	}
+
 	/** The store's name (`memory`, `redis`…). */
 	get name(): string {
 		return this.#store.name;
@@ -793,13 +875,17 @@ export class Limiter {
 	 */
 	async consume(key: string, amount = 1): Promise<LimiterResponse> {
 		const points = amount > 0 ? amount : 1;
-		let record = await this.#store.increment(key, points, this.duration);
+		let record = await this.#store.increment(
+			this.#stored(key),
+			points,
+			this.duration,
+		);
 		if (record.consumed > this.requests) {
 			// Block on the request that went over, not on every later one: a
 			// blocked key keeps its block, it does not have it extended.
 			if (this.blockDuration > 0 && record.consumed <= this.requests + points) {
 				record = await this.#store.set(
-					key,
+					this.#stored(key),
 					record.consumed,
 					this.blockDuration,
 				);
@@ -813,18 +899,18 @@ export class Limiter {
 	async increment(key: string, amount = 1): Promise<LimiterResponse> {
 		const points = amount > 0 ? amount : 1;
 		return this.#response(
-			await this.#store.increment(key, points, this.duration),
+			await this.#store.increment(this.#stored(key), points, this.duration),
 		);
 	}
 
 	/** Give `amount` requests (default 1) back, never below zero. */
 	async decrement(key: string, amount = 1): Promise<LimiterResponse> {
-		const existing = await this.#store.get(key);
+		const existing = await this.#store.get(this.#stored(key));
 		if (existing === null) return this.set(key, 0);
 		const points = Math.min(amount > 0 ? amount : 1, existing.consumed);
 		if (points <= 0) return this.#response(existing);
 		return this.#response(
-			await this.#store.increment(key, -points, this.duration),
+			await this.#store.increment(this.#stored(key), -points, this.duration),
 		);
 	}
 
@@ -835,7 +921,7 @@ export class Limiter {
 	): Promise<LimiterResponse> {
 		return this.#response(
 			await this.#store.set(
-				key,
+				this.#stored(key),
 				this.requests + 1,
 				durationToSeconds(duration, "a block duration"),
 			),
@@ -852,17 +938,19 @@ export class Limiter {
 			duration === undefined
 				? this.duration
 				: durationToSeconds(duration, "a limiter duration");
-		return this.#response(await this.#store.set(key, requests, seconds));
+		return this.#response(
+			await this.#store.set(this.#stored(key), requests, seconds),
+		);
 	}
 
 	/** Forget `key`. */
 	delete(key: string): Promise<boolean> {
-		return this.#store.delete(key);
+		return this.#store.delete(this.#stored(key));
 	}
 
 	/** Where `key` stands, or `null` when it has nothing counted. */
 	async get(key: string): Promise<LimiterResponse | null> {
-		const record = await this.#store.get(key);
+		const record = await this.#store.get(this.#stored(key));
 		return record === null ? null : this.#response(record);
 	}
 
@@ -907,25 +995,35 @@ export class Limiter {
 	 * Run `callback`, counting only its FAILURES against `key` — the shape of
 	 * a login: a wrong password costs an attempt, a right one clears the
 	 * count. Returns `[error, null]` without running the callback when the key
-	 * has no attempt left, `[null, result]` on success; a failure is re-thrown
-	 * after it is counted (and the key blocked, with a `blockDuration`, once
-	 * it runs out).
+	 * has no attempt left, `[null, result]` on success; a failure is re-thrown,
+	 * counted (and the key blocked, with a `blockDuration`, once it runs out).
+	 *
+	 * NAMED DEVIATION, stricter than upstream, which reads the count, runs the
+	 * callback, then counts the failure: requests sent together all read
+	 * "attempts left" before the first one has failed, so a burst of any size
+	 * runs its callbacks — every password of the burst checked against a
+	 * budget of 5. Here the attempt is counted BEFORE the callback runs (the
+	 * store's increment is atomic) and the count is cleared on success, so
+	 * at most `requests` callbacks run for a key however many arrive at once.
+	 * A refused attempt stays counted: giving it back could undo a block
+	 * written in between.
 	 */
 	async penalize<T>(
 		key: string,
 		callback: () => T | Promise<T>,
 		amount?: number,
 	): Promise<[ThrottleException, null] | [null, T]> {
-		const response = await this.get(key);
-		if (response && response.remaining <= 0) {
-			return [new E_TOO_MANY_REQUESTS(response), null];
+		const points = amount !== undefined && amount > 0 ? amount : 1;
+		const reserved = await this.increment(key, points);
+		// Refused when the key had no attempt left before this one.
+		if (reserved.consumed - points >= reserved.limit) {
+			return [new E_TOO_MANY_REQUESTS(reserved), null];
 		}
 		let result: T;
 		try {
 			result = await callback();
 		} catch (error) {
-			const { consumed, limit } = await this.increment(key, amount);
-			if (consumed >= limit && this.blockDuration > 0) {
+			if (reserved.consumed >= reserved.limit && this.blockDuration > 0) {
 				await this.block(key, this.blockDuration);
 			}
 			throw error;
@@ -1035,21 +1133,25 @@ export class MultiLimiter {
 	 * that runs out is blocked for its limiter's `blockDuration`. `[error,
 	 * null]` without running it when one key has no attempt left; on success
 	 * every key is cleared and the result is `[null, result]`.
+	 *
+	 * NAMED DEVIATION, as {@link Limiter.penalize}: the attempt is counted on
+	 * every limiter before the callback runs, so concurrent attempts cannot
+	 * all read "attempts left". A refused attempt stays counted on every
+	 * limiter, the ones that had room included.
 	 */
 	async penalize<T>(
 		callback: () => T | Promise<T>,
 	): Promise<[ThrottleException, null] | [null, T]> {
-		const responses = await this.get();
-		const exhausted = responses.find(
-			(response) => response !== null && response.remaining <= 0,
+		const reserved = await this.increment();
+		const exhausted = reserved.find(
+			(response) => response.consumed > response.limit,
 		);
 		if (exhausted) return [new E_TOO_MANY_REQUESTS(exhausted), null];
 		let result: T;
 		try {
 			result = await callback();
 		} catch (error) {
-			const counted = await this.increment();
-			for (const [index, response] of counted.entries()) {
+			for (const [index, response] of reserved.entries()) {
 				const entry = this.#limiters[index];
 				if (
 					entry !== undefined &&

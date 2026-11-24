@@ -19,6 +19,12 @@ import {
 /** Framework-agnostic view of an incoming request. */
 export interface CoreRequest {
 	method: string;
+	/**
+	 * The method on the request line, when the host can tell it from `method`:
+	 * a `_method` field or an override header may have rewritten the latter.
+	 * The CSRF check guards a request under either.
+	 */
+	wireMethod?: string;
 	path: string;
 	/** Full URL (or at least `path?query`) — used to extract the query string. */
 	url: string;
@@ -244,7 +250,15 @@ export function csrfBodyString(body: unknown): string | undefined {
 	if (typeof body === "string") return body;
 	if (typeof body === "object" && body !== null && "_csrf" in body) {
 		const token = Reflect.get(body, "_csrf");
-		if (typeof token === "string") return `_csrf=${encodeURIComponent(token)}`;
+		if (typeof token !== "string") return undefined;
+		try {
+			return `_csrf=${encodeURIComponent(token)}`;
+		} catch {
+			// A lone surrogate cannot be encoded. No token was ever minted with
+			// one, so the field counts as absent: a guarded request is refused
+			// as any other bad token, an unguarded one is not disturbed.
+			return undefined;
+		}
 	}
 	return undefined;
 }
@@ -391,6 +405,25 @@ export function runGuardPhase(
 }
 
 /**
+ * The methods the CSRF decision is taken on: the one on the request line
+ * first, then the one the host reports when it is another.
+ *
+ * NAMED DEVIATION, stricter than upstream, whose guard reads the method after
+ * `_method` rewrote it: a body field the router never read could then name a
+ * verb outside `csrf.methods` and take a POST out of the guarded set, with the
+ * POST handler still running. A request is guarded when EITHER method is in
+ * `csrf.methods` — a POST on the wire whatever `_method` says, and a
+ * `POST ?_method=DELETE` under an application that guards DELETE only.
+ */
+function csrfMethodsOf(req: CoreRequest): string[] {
+	const wire = req.wireMethod;
+	if (wire === undefined || wire.toUpperCase() === req.method.toUpperCase()) {
+		return [req.method];
+	}
+	return [wire, req.method];
+}
+
+/**
  * The CSRF double-submit token and the CSP nonce. No side effects.
  */
 export function runCsrfPhase(bh: Blackhole, req: CoreRequest): CsrfOutcome {
@@ -412,17 +445,22 @@ export function runCsrfPhase(bh: Blackhole, req: CoreRequest): CsrfOutcome {
 	// CSRF only — the rate limit, counted in the guard phase, still counts
 	// the request.
 	const exempt = bh.csrfExempt(contextOf(req));
-	let result: CheckResult | undefined;
+	let enforced = false;
 	if (!exempt) {
-		const checked = engineCheck(bh, req, ["csrf"]);
-		if (checked.reject) return checked.reject;
-		result = checked.result;
+		// The Origin and token checks do not depend on the method: once they
+		// passed under one guarded method, the other has nothing to add.
+		for (const method of csrfMethodsOf(req)) {
+			const checked = engineCheck(bh, { ...req, method }, ["csrf"]);
+			if (checked.reject) return checked.reject;
+			enforced = checked.result.csrfEnforced ?? false;
+			if (enforced) break;
+		}
 	}
 	const csrfToken = existing ?? bh.generateCsrfToken(req.csrfBinding);
 	return {
 		kind: "pass",
 		csrfToken,
-		csrfProtected: exempt ? false : (result?.csrfEnforced ?? false),
+		csrfProtected: enforced,
 		// Not seeded when the app turned the readable cookie off: an all-SSR app
 		// sends the token in the `_csrf` field and has no use for it. Exemption
 		// skips VERIFICATION, not the cookie: a page served from an exempt route

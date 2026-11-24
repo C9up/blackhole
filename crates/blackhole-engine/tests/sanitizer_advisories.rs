@@ -7,6 +7,7 @@
 //! capitals was not recognised as one. The fixed sanitizer is pinned in
 //! `Cargo.lock`; these keep the output honest whichever version runs.
 
+use blackhole_engine::html_limits::HtmlLimits;
 use blackhole_engine::xss::{sanitize_html, sanitize_html_with};
 
 const ANIMATE: [&str; 3] = ["animateMotion", "animateTransform", "animateColor"];
@@ -17,7 +18,7 @@ fn svg_animation_elements_carry_nothing_out() {
         let input = format!(
             r#"<svg><a><{element} attributeName="href" values="javascript:alert(1)"/><text>x</text></a></svg>"#
         );
-        let out = sanitize_html(&input);
+        let out = sanitize_html(&input).expect("within the limits");
         let lower = out.to_ascii_lowercase();
         assert!(
             !lower.contains(&element.to_ascii_lowercase()),
@@ -37,7 +38,9 @@ fn svg_animation_elements_carry_nothing_out_with_every_opt_in() {
     for element in ANIMATE {
         let input =
             format!(r#"<svg><{element} attributeName="href" to="javascript:alert(1)"/></svg>"#);
-        let out = sanitize_html_with(&input, &allow).to_ascii_lowercase();
+        let out = sanitize_html_with(&input, &allow, &HtmlLimits::default())
+            .expect("within the limits")
+            .to_ascii_lowercase();
         assert!(!out.contains("javascript:"), "{input} -> {out}");
     }
 }
@@ -55,7 +58,7 @@ fn no_css_url_survives_whatever_its_case_or_quoting() {
         r#"<p style="color:red;background:url(&quot;https://evil.example/a&quot;)">x</p>"#,
         r#"<p style="color:red;background:url(&quot;&quot;);x:url(https://evil.example/a)">x</p>"#,
     ] {
-        let out = sanitize_html(input);
+        let out = sanitize_html(input).expect("within the limits");
         assert!(!out.contains("evil.example"), "{input} -> {out}");
         assert!(
             !out.to_ascii_lowercase().contains("url("),

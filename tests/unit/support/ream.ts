@@ -57,6 +57,8 @@ export interface ReamSpy {
 export interface ReamOptions {
 	bh: Blackhole;
 	method?: string;
+	/** The method on the request line (`request.intended()`); `method` by default. */
+	intended?: string;
 	path?: string;
 	query?: string;
 	headers?: Record<string, string>;
@@ -141,6 +143,7 @@ export function reamContext(options: ReamOptions): {
 		i18n: options.i18n,
 		request: {
 			method: () => options.method ?? "GET",
+			intended: () => options.intended ?? options.method ?? "GET",
 			url: (full?: boolean) =>
 				full && options.query ? `${path}?${options.query}` : path,
 			path: () => path,

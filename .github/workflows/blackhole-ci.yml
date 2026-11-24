@@ -96,6 +96,10 @@ jobs:
       # `tsconfig.json`, which includes them.
       - run: pnpm typecheck
       - run: pnpm lint
+      # The platform packages' manifests and the optionalDependencies that pin
+      # them follow package.json's version. A bump without the script leaves a
+      # main package pointing at platform packages of another version.
+      - run: node scripts/platform-packages.mjs --check
   build-and-test:
     name: Build & test (${{ matrix.suffix }})
     needs: version-gate
@@ -262,6 +266,15 @@ jobs:
       # Pinned and --locked: the auditor is itself a dependency of the release.
       - run: cargo install cargo-audit --locked --version 0.22.2
       - run: cargo audit --deny warnings
+      # THIRD-PARTY-NOTICES.md, the notices shipped beside the binaries, follows
+      # Cargo.lock: regenerated here, it fails the job when it differs from the
+      # committed file, and so does a crate under a licence about.toml does not
+      # accept. The generator is pinned and --locked like the auditor.
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '24'
+      - run: cargo install cargo-about --locked --version 0.9.3 --features cli
+      - run: node scripts/third-party-notices.mjs --check
 
   npm-audit:
     name: Advisories (npm, production tree)
@@ -297,6 +310,11 @@ jobs:
     # between one write-access account and a release, and npm trusted
     # publishing is bound to this name.
     environment: npm
+    env:
+      # The platform packages, one per binary the matrix builds. The same list
+      # as the matrix and as scripts/platform-packages.mjs, which a step below
+      # holds this one to.
+      SUFFIXES: linux-x64-gnu linux-arm64-gnu darwin-x64 darwin-arm64 win32-x64-msvc
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -412,31 +430,93 @@ jobs:
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: blackhole-napi-*
+          path: artifacts
           merge-multiple: true
 
       # A publish missing a platform is worse than no publish: it installs
       # cleanly and then fails to load, on the machines least able to diagnose
       # it. The upload side refuses an empty artefact, but this job alone can be
       # rerun after the run's artefacts expired, or a suffix renamed on one side
-      # only, and `files` then simply packs fewer binaries.
+      # only. Each binary then goes into its platform package, with the licence
+      # and the third-party notices.
       - name: Every platform's binaries, or nothing goes out
         run: |
+          node scripts/platform-packages.mjs --check
+          listed=$(node scripts/platform-packages.mjs --list | tr '\n' ' ' | sed 's/ $//')
+          if [ "$listed" != "$SUFFIXES" ]; then
+            echo "::error::scripts/platform-packages.mjs lists '$listed', this job '$SUFFIXES'"
+            exit 1
+          fi
           missing=0
-          for suffix in linux-x64-gnu linux-arm64-gnu darwin-x64 darwin-arm64 win32-x64-msvc; do
+          for suffix in $SUFFIXES; do
             for stem in index; do
-              if [ ! -f "${stem}.${suffix}.node" ]; then
+              if [ ! -f "artifacts/${stem}.${suffix}.node" ]; then
                 echo "::error::${stem}.${suffix}.node was not produced by the matrix"
                 missing=1
               fi
             done
           done
           [ "$missing" -eq 0 ] || exit 1
-          ls -la ./*.node
+          for suffix in $SUFFIXES; do
+            mv "artifacts/index.${suffix}.node" "npm/${suffix}/"
+            cp LICENSE THIRD-PARTY-NOTICES.md "npm/${suffix}/"
+          done
+          ls -la npm/*/
+          if ls ./*.node >/dev/null 2>&1; then
+            echo "::error::a .node file sits at the package root, where the main package must not carry one"
+            exit 1
+          fi
 
-      # --provenance signs the tarball with this run's OIDC identity, so every
+      # npm has no multi-package transaction, so every package is packed once
+      # before anything goes out: a manifest npm refuses stops the job while
+      # nothing is published yet.
+      - name: Dry run every package
+        run: |
+          for suffix in $SUFFIXES; do
+            (cd "npm/${suffix}" && npm publish --dry-run --access public)
+          done
+          pnpm publish --dry-run --access public --no-git-checks
+
+      # The platform packages go first: the main package pins each one at its
+      # exact version, and an install of it must find them. A rerun after a
+      # partial failure skips the ones npm already holds at this version, since
+      # npm never accepts a version twice.
+      # --provenance signs each tarball with this run's OIDC identity, so every
       # version can be traced to the commit and the workflow run that built it,
       # and the same files published from a laptop are told apart. --tag is the
       # drift gate's answer: `latest`, or `backport` for an older line.
+      - name: Publish the platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DIST_TAG: ${{ steps.drift.outputs.dist_tag }}
+        run: |
+          if [ -z "$DIST_TAG" ]; then
+            echo "::error::the drift gate produced no dist-tag — refuse to publish"
+            exit 1
+          fi
+          version=$(node -p "require('./package.json').version")
+          for suffix in $SUFFIXES; do
+            name="@c9up/blackhole-${suffix}"
+            npm_err=$(mktemp)
+            # `if` form so `set -e` does not abort on E404 (a name never
+            # published). An existing name without this version answers nothing.
+            if held=$(npm view --fetch-timeout=30000 "${name}@${version}" version 2>"$npm_err"); then
+              status=0
+            else
+              status=$?
+            fi
+            err=$(cat "$npm_err"); rm -f "$npm_err"
+            if [ "$status" -ne 0 ] && ! echo "$err" | grep -qE 'E404|404 Not Found'; then
+              echo "::error::Cannot reach npm registry for ${name} — refuse to publish. Output: $err"
+              exit 1
+            fi
+            if [ "$status" -eq 0 ] && [ "$held" = "$version" ]; then
+              echo "::notice::${name}@${version} is already on npm — skipped"
+              continue
+            fi
+            (cd "npm/${suffix}" && npm publish --access public --provenance --tag "$DIST_TAG")
+          done
+
       - name: Publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

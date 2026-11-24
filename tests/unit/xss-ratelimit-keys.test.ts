@@ -15,15 +15,21 @@ const FRAGMENT =
 	'<a id="config" is="x-y" slot="s" part="p" data-bind="x" class="c" href="/x">l</a>';
 
 describe("blackhole > XSS sanitizer attributes", () => {
-	it("drops id, is, slot, part and data-* by default", () => {
+	it("drops id, is, slot, part, data-* and class by default", () => {
 		const out = createBlackhole({ csrf: false }).sanitizeResponse(
 			FRAGMENT,
 			"text/html",
 		);
-		for (const attribute of ["id=", "is=", "slot=", "part=", "data-bind="]) {
+		for (const attribute of [
+			"id=",
+			"is=",
+			"slot=",
+			"part=",
+			"data-bind=",
+			"class=",
+		]) {
 			expect(out).not.toContain(attribute);
 		}
-		expect(out).toContain('class="c"');
 	});
 
 	it("keeps the attributes an application opts into", () => {

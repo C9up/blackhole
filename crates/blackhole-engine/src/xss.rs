@@ -15,6 +15,8 @@
 
 use std::collections::HashSet;
 
+use crate::html_limits::{self, HtmlLimits, HtmlRefusal};
+
 /// CSS properties an untrusted fragment may set.
 ///
 /// Presentation only. Deliberately absent: `position`, `top`/`left`/`right`/
@@ -69,8 +71,11 @@ const SAFE_STYLE_PROPERTIES: [&str; 34] = [
 /// replaces `window.config` for any script that reads it (DOM clobbering);
 /// `is` instantiates a customized built-in element; `data-*` is what
 /// client-side frameworks read bindings and templates from, a script gadget
-/// without a single `<script>`; `slot` and `part` reach into shadow DOM.
-pub const OPT_IN_ATTRIBUTES: [&str; 5] = ["id", "is", "slot", "part", "data-*"];
+/// without a single `<script>`; `slot` and `part` reach into shadow DOM;
+/// `class` selects every rule of the page's own stylesheet — on a page built
+/// with utility classes, `class="fixed inset-0 z-50"` is the full-page
+/// overlay the `style` filter below refuses.
+pub const OPT_IN_ATTRIBUTES: [&str; 6] = ["id", "is", "slot", "part", "data-*", "class"];
 
 /// Build the ammonia sanitizer (safe allow-list) used for untrusted fragments:
 /// - Keeps ammonia's default allow-list of safe tags; UNWRAPS everything else
@@ -79,7 +84,7 @@ pub const OPT_IN_ATTRIBUTES: [&str; 5] = ["id", "is", "slot", "part", "data-*"];
 ///   <object>, <embed>.
 /// - Strips all event-handler attributes (on*) and `javascript:` URIs (ammonia
 ///   default: only explicitly-allowed attributes/URIs survive).
-/// - Allows a set of presentational generic attributes (class, role, title, …),
+/// - Allows a set of presentational generic attributes (role, title, …),
 ///   plus `style` narrowed to presentation-only properties. The attributes of
 ///   [`OPT_IN_ATTRIBUTES`] are kept only when listed in `allow`.
 fn build_html_sanitizer<'a>(allow: &'a [String]) -> ammonia::Builder<'a> {
@@ -92,7 +97,7 @@ fn build_html_sanitizer<'a>(allow: &'a [String]) -> ammonia::Builder<'a> {
         .clean_content_tags(HashSet::from(["script", "style", "iframe", "object", "embed"]))
         // Generic attributes kept on every tag: presentation and semantics
         // only — nothing a script or the shadow DOM reads as an address.
-        .add_generic_attributes(["class", "style", "role", "tabindex",
+        .add_generic_attributes(["style", "role", "tabindex",
             "title", "lang", "dir", "hidden"])
         // `style` carries no script, but unrestricted it is still a takeover:
         // `position:fixed` at full size covers the real page with the
@@ -136,14 +141,26 @@ fn build_html_sanitizer<'a>(allow: &'a [String]) -> ammonia::Builder<'a> {
 ///   (page takeover) and nothing taking a `url()` (outbound request)
 /// - Drops `id`, `is`, `slot`, `part` and `data-*` (see [`OPT_IN_ATTRIBUTES`])
 /// - Never double-encodes existing HTML entities
-pub fn sanitize_html(input: &str) -> String {
-    sanitize_html_with(input, &[])
+/// - Refuses an input past the default [`HtmlLimits`] (see [`html_limits`])
+pub fn sanitize_html(input: &str) -> Result<String, HtmlRefusal> {
+    sanitize_html_with(input, &[], &HtmlLimits::default())
 }
 
 /// [`sanitize_html`], keeping the attributes of [`OPT_IN_ATTRIBUTES`] named in
-/// `allow`.
-pub fn sanitize_html_with(input: &str, allow: &[String]) -> String {
-    build_html_sanitizer(allow).clean(input).to_string()
+/// `allow` and holding the input to `limits`.
+///
+/// The parse is not linear in its input (misnested formatting elements are
+/// re-created in every block, deep nesting rescans the open elements), so an
+/// input is measured before ammonia parses it: one that is too long, nests
+/// too deep or builds far more markup than it holds is refused, never
+/// passed through.
+pub fn sanitize_html_with(
+    input: &str,
+    allow: &[String],
+    limits: &HtmlLimits,
+) -> Result<String, HtmlRefusal> {
+    html_limits::check(input, limits)?;
+    Ok(build_html_sanitizer(allow).clean(input).to_string())
 }
 
 /// Sanitize a response body based on content type.
@@ -159,29 +176,47 @@ pub fn sanitize_html_with(input: &str, allow: &[String]) -> String {
 ///
 /// Standalone version — takes `(body, content_type)` instead of a framework
 /// response struct, so it works with any HTTP server.
-pub fn sanitize_response(body: &str, content_type: &str) -> String {
-    sanitize_response_with(body, content_type, &[])
+pub fn sanitize_response(body: &str, content_type: &str) -> Result<String, HtmlRefusal> {
+    sanitize_response_with(body, content_type, &[], &HtmlLimits::default())
 }
 
 /// [`sanitize_response`], keeping the opted-in attributes of `allow` (see
-/// [`OPT_IN_ATTRIBUTES`]).
-pub fn sanitize_response_with(body: &str, content_type: &str, allow: &[String]) -> String {
+/// [`OPT_IN_ATTRIBUTES`]) and holding a `text/html` body to `limits`.
+pub fn sanitize_response_with(
+    body: &str,
+    content_type: &str,
+    allow: &[String],
+    limits: &HtmlLimits,
+) -> Result<String, HtmlRefusal> {
     let ct = content_type.to_ascii_lowercase();
     if ct.starts_with("text/html") {
-        sanitize_html_with(body, allow)
+        sanitize_html_with(body, allow, limits)
     } else {
         // Non-HTML content types (text/plain, JSON, CSV, binary, …) are never
         // interpreted as markup by the browser — with `X-Content-Type-Options:
         // nosniff` (blackhole's default) there is no XSS vector to escape.
         // Entity-escaping them would only corrupt legitimate bodies
         // (robots.txt, plain-text APIs, CSV, …) for zero security gain.
-        body.to_string()
+        Ok(body.to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sanitize_html(input: &str) -> String {
+        super::sanitize_html(input).expect("within the default limits")
+    }
+
+    fn sanitize_html_with(input: &str, allow: &[String]) -> String {
+        super::sanitize_html_with(input, allow, &HtmlLimits::default())
+            .expect("within the default limits")
+    }
+
+    fn sanitize_response(body: &str, content_type: &str) -> String {
+        super::sanitize_response(body, content_type).expect("within the default limits")
+    }
 
     // === HTML sanitization tests ===
 
@@ -260,12 +295,20 @@ mod tests {
         let out = sanitize_html(
             r#"<a id="config" is="x-y" slot="s" part="p" data-bind="x" class="c" title="t">l</a>"#,
         );
-        for attribute in ["id=", "is=", "slot=", "part=", "data-bind="] {
+        for attribute in ["id=", "is=", "slot=", "part=", "data-bind=", "class="] {
             assert!(!out.contains(attribute), "{attribute} survived: {out}");
         }
         // The presentational ones stay.
-        assert!(out.contains(r#"class="c""#));
         assert!(out.contains(r#"title="t""#));
+    }
+
+    #[test]
+    fn test_sanitize_html_drops_a_class_overlay_unless_opted_in() {
+        // On a page built with utility classes, the class list is the style:
+        // the overlay `style="position:fixed"` cannot draw.
+        let overlay = r#"<div class="fixed inset-0 z-50 bg-white">Session expired</div>"#;
+        assert_eq!(sanitize_html(overlay), "<div>Session expired</div>");
+        assert_eq!(sanitize_html_with(overlay, &["class".to_string()]), overlay);
     }
 
     #[test]

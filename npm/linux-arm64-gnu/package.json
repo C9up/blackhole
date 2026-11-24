@@ -1,0 +1,32 @@
+{
+  "name": "@c9up/blackhole-linux-arm64-gnu",
+  "version": "0.1.30",
+  "description": "The linux-arm64-gnu native engine of @c9up/blackhole, installed by it as an optional dependency.",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "main": "index.linux-arm64-gnu.node",
+  "files": [
+    "index.linux-arm64-gnu.node",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/C9up/blackhole.git",
+    "directory": "npm/linux-arm64-gnu"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -414,7 +414,8 @@ describe("blackhole > RedisLimiterStore", () => {
 		const second = await l.consume("k");
 		expect(second.remaining).toBe(0);
 		expect(second.availableIn).toBe(60);
-		expect(client.data.get("app:limits:k")).toBe("2");
+		// Under the store's prefix, then the budget's own namespace.
+		expect(client.data.get("app:limits:2/60/0:k")).toBe("2");
 		await expect(l.consume("k")).rejects.toBeInstanceOf(ThrottleException);
 	});
 
